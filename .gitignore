@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Application data
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Environment / secrets
+.env
+.env.local
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store

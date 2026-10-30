@@ -1,0 +1,29 @@
+[project]
+name = "network-tools"
+version = "0.1.0"
+description = "AI-powered local network monitoring and troubleshooting agent (Suricata + LLM)"
+readme = "README.fa.md"
+requires-python = ">=3.13"
+dependencies = [
+    "openai>=3.39.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+]
+
+[project.scripts]
+netagent = "netagent.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.7,<1"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "netagent"

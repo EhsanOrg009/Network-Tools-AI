@@ -95,11 +95,30 @@ def get_owned_session(db: Database, session_id: str, actor: str) -> dict[str, An
     return session
 
 
+def _is_idle_expired(session: dict[str, Any]) -> bool:
+    """True when the session has been inactive longer than its idle window."""
+    idle = session.get("idle_timeout_seconds")
+    last = session.get("last_active_at")
+    if not idle or not last:
+        return False
+    try:
+        from datetime import datetime
+        last_dt = datetime.fromisoformat(str(last))
+    except (TypeError, ValueError):
+        return False
+    if last_dt.tzinfo is None:
+        from datetime import timezone
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    return (time.time() - last_dt.timestamp()) > int(idle)
+
+
 def _ensure_usable(session: dict[str, Any]) -> None:
     if session["status"] not in ("creating", "active"):
         raise ConsoleError(f"session is {session['status']}")
     if session.get("expiry_epoch") and time.time() > session["expiry_epoch"]:
         raise ConsoleError("session expired")
+    if _is_idle_expired(session):
+        raise ConsoleError("session idle-expired")
 
 
 def submit_command(

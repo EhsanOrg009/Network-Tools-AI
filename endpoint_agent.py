@@ -117,6 +117,9 @@ class State:
         return True
 
 
+MAX_SEEN_NONCES = 200
+
+
 # ---------------------------------------------------------------------------
 # HTTP client (stdlib urllib; TLS verification never disabled)
 # ---------------------------------------------------------------------------
@@ -190,7 +193,14 @@ def derive_signing_key(master: str, agent_id: str) -> str:
     return f"{first}:{second}"
 
 
-def verify_envelope(message: dict, master_key: str, agent_id: str) -> tuple[bool, str]:
+def verify_envelope(message: dict, master_key: str, agent_id: str,
+                    seen_nonces: list[str] | None = None) -> tuple[bool, str]:
+    """Verify a signed admin task envelope.
+
+    When ``seen_nonces`` is given it is updated in place (bounded by the
+    caller): a nonce that was already accepted yields ``(False, "nonce
+    replay")`` — an attacker replaying a captured envelope (even inside its
+    validity window) is rejected independently of the task-id dedupe."""
     env = message.get("envelope")
     if not isinstance(env, dict):
         return False, "missing envelope"
@@ -217,6 +227,13 @@ def verify_envelope(message: dict, master_key: str, agent_id: str) -> tuple[bool
         return False, "params do not match the signed digest"
     if time.time() > float(payload["expires_epoch"]):
         return False, "envelope expired"
+    nonce = str(payload["nonce"])
+    if seen_nonces is not None:
+        if nonce in seen_nonces:
+            return False, "nonce replay (already accepted)"
+        seen_nonces.append(nonce)
+        if len(seen_nonces) > MAX_SEEN_NONCES:
+            del seen_nonces[: len(seen_nonces) - MAX_SEEN_NONCES]
     return True, "ok"
 
 
@@ -740,8 +757,9 @@ class ConsoleSession:
     MARKER_VAL = "\x02CVAL"
     MARKER_READY = "\x02CREADY"
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, idle_timeout_seconds: float = 300.0):
         self.id = session_id
+        self.idle_timeout = float(idle_timeout_seconds or 300.0)
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
         self.out_lines: list[str] = []
@@ -751,6 +769,7 @@ class ConsoleSession:
         self.done = threading.Event()
         self.ready = threading.Event()
         self.alive = False
+        self.busy = False
         self.last_active = time.time()
 
     def start(self) -> None:
@@ -803,44 +822,51 @@ class ConsoleSession:
     def execute(self, code: str, timeout_seconds: float) -> dict:
         started = time.monotonic()
         with self.lock:
-            if not self.alive or self.proc is None:
-                return {"ok": False, "session_lost": True,
-                        "error": "interpreter is not running"}
-            self.out_lines.clear()
-            self.err_text.clear()
-            self.val_repr = None
-            self.done.clear()
+            self.busy = True
             try:
-                b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
-                assert self.proc.stdin is not None
-                self.proc.stdin.write((b64 + "\n").encode("ascii"))
-                self.proc.stdin.flush()
-            except (OSError, ValueError):
-                self.alive = False
-                return {"ok": False, "session_lost": True,
-                        "error": "interpreter pipe closed"}
-            finished = self.done.wait(max(1.0, float(timeout_seconds)))
-            duration = round((time.monotonic() - started) * 1000, 1)
-            if not finished:
-                # kill the whole interpreter: a thread cannot be aborted safely
-                self.kill()
-                return {"ok": False, "session_lost": True, "timed_out": True,
-                        "stdout": "\n".join(self.out_lines)[:64 * 1024],
-                        "stderr": "\n".join(self.err_text)[:32 * 1024],
-                        "error": "command timeout; interpreter terminated",
-                        "duration_ms": duration}
-            if not self.alive:
-                return {"ok": False, "session_lost": True,
-                        "stdout": "\n".join(self.out_lines)[:64 * 1024],
-                        "stderr": "\n".join(self.err_text)[:32 * 1024],
-                        "error": "interpreter exited during command",
-                        "duration_ms": duration}
-            status = getattr(self, "_status", "err")
-            return {"ok": status == "ok",
+                return self._execute_locked(code, timeout_seconds, started)
+            finally:
+                self.busy = False
+
+    def _execute_locked(self, code: str, timeout_seconds: float, started: float) -> dict:
+        if not self.alive or self.proc is None:
+            return {"ok": False, "session_lost": True,
+                    "error": "interpreter is not running"}
+        self.out_lines.clear()
+        self.err_text.clear()
+        self.val_repr = None
+        self.done.clear()
+        try:
+            b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+            assert self.proc.stdin is not None
+            self.proc.stdin.write((b64 + "\n").encode("ascii"))
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            self.alive = False
+            return {"ok": False, "session_lost": True,
+                    "error": "interpreter pipe closed"}
+        finished = self.done.wait(max(1.0, float(timeout_seconds)))
+        duration = round((time.monotonic() - started) * 1000, 1)
+        if not finished:
+            # kill the whole interpreter: a thread cannot be aborted safely
+            self.kill()
+            return {"ok": False, "session_lost": True, "timed_out": True,
                     "stdout": "\n".join(self.out_lines)[:64 * 1024],
                     "stderr": "\n".join(self.err_text)[:32 * 1024],
-                    "result_repr": self.val_repr,
+                    "error": "command timeout; interpreter terminated",
                     "duration_ms": duration}
+        if not self.alive:
+            return {"ok": False, "session_lost": True,
+                    "stdout": "\n".join(self.out_lines)[:64 * 1024],
+                    "stderr": "\n".join(self.err_text)[:32 * 1024],
+                    "error": "interpreter exited during command",
+                    "duration_ms": duration}
+        status = getattr(self, "_status", "err")
+        return {"ok": status == "ok",
+                "stdout": "\n".join(self.out_lines)[:64 * 1024],
+                "stderr": "\n".join(self.err_text)[:32 * 1024],
+                "result_repr": self.val_repr,
+                "duration_ms": duration}
 
     def kill(self) -> None:
         if self.proc is None:
@@ -872,14 +898,19 @@ class ConsoleManager:
         self.sessions: dict[str, ConsoleSession] = {}
         self.max_sessions = max_sessions
 
-    def start(self, session_id: str) -> dict:
+    def start(self, session_id: str, idle_timeout_seconds: float | None = None) -> dict:
         self.reap()
         existing = self.sessions.get(session_id)
         if existing and existing.alive:
+            if idle_timeout_seconds is not None:
+                existing.idle_timeout = float(idle_timeout_seconds)
             return {"ok": True, "session_id": session_id, "detail": "already running"}
         if len(self.sessions) >= self.max_sessions:
             return {"ok": False, "error": "local session limit reached"}
-        session = ConsoleSession(session_id)
+        session = ConsoleSession(
+            session_id,
+            idle_timeout_seconds=float(idle_timeout_seconds or 300.0),
+        )
         session.start()
         if not session.ready.wait(10):
             session.kill()
@@ -903,9 +934,19 @@ class ConsoleManager:
         return {"ok": True, "detail": "terminated"}
 
     def reap(self) -> None:
+        """Drop dead interpreters, plus interpreters idle beyond their window.
+
+        An idle session is killed (not just forgotten): the console interpreter
+        must not outlive the server-side idle policy. Busy sessions (a command
+        currently executing) are never reaped — the idle clock pauses while a
+        long command runs."""
+        now = time.time()
         for sid, session in list(self.sessions.items()):
             if not session.alive:
                 self.sessions.pop(sid, None)
+            elif not session.busy and (now - session.last_active) > session.idle_timeout:
+                self.sessions.pop(sid, None)
+                session.kill()
 
 
 # ---------------------------------------------------------------------------
@@ -983,6 +1024,7 @@ class EndpointAgent:
             "agent_token": response["agent_token"],
             "enrolled_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "executed_task_ids": [],
+            "seen_envelope_nonces": [],
         })
         self.state.save()
         print(f"ثبت‌نام موفق: agent_id={response['agent_id']}")
@@ -1036,7 +1078,10 @@ class EndpointAgent:
             return
         if ttype in ("admin_python_script", "console_session",
                      "console_command", "console_terminate"):
-            ok, reason = verify_envelope(message, self.signing_key, self.state.agent_id or "")
+            ok, reason = verify_envelope(
+                message, self.signing_key, self.state.agent_id or "",
+                seen_nonces=self.state.data.setdefault("seen_envelope_nonces", []),
+            )
             if not ok:
                 self._submit_result(task_id, False, None,
                                     f"signature verification failed: {reason}")
@@ -1076,7 +1121,11 @@ class EndpointAgent:
                 result = run_admin_script(params, timeout_seconds)
                 return result, bool(result.get("ok"))
             if ttype == "console_session":
-                result = self.console.start(str(params.get("session_id")))
+                try:
+                    idle = float(params.get("idle_timeout_seconds") or 300.0)
+                except (TypeError, ValueError):
+                    idle = 300.0
+                result = self.console.start(str(params.get("session_id")), idle)
                 return result, bool(result.get("ok"))
             if ttype == "console_command":
                 result = self.console.execute(
@@ -1126,6 +1175,11 @@ class EndpointAgent:
             try:
                 if time.time() - self.last_heartbeat >= self.heartbeat_interval:
                     hb = self.heartbeat()
+                    # the server may adjust the cadence centrally (e.g. probe storms
+                    # quieted): honor it within sane bounds, never faster than 5s.
+                    hb_interval = hb.get("heartbeat_interval_seconds")
+                    if isinstance(hb_interval, (int, float)) and hb_interval >= 1:
+                        self.heartbeat_interval = min(3600.0, max(5.0, float(hb_interval)))
                     if hb.get("inventory_due") or \
                             time.time() - self.last_inventory >= self.inventory_interval:
                         self.push_inventory()
@@ -1188,6 +1242,15 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--state-file", default=None)
 
+    diag = sub.add_parser(
+        "diagnostics",
+        help="خودآزمایی محلی: وضعیت جمع‌کننده‌ها، رابط‌های شبکه و (با --ping-server) دسترسی به مرکز",
+    )
+    diag.add_argument("--state-file", default=None)
+    diag.add_argument("--server-url", default=None)
+    diag.add_argument("--ping-server", action="store_true",
+                      help="همچنین یک درخواست /health به مرکز بفرست")
+
     return parser
 
 
@@ -1204,6 +1267,42 @@ def main(argv: list[str] | None = None) -> int:
     state_path = getattr(args, "state_file", None) or args.state_file
     if args.command == "inventory":
         print(json.dumps(collect_inventory(), ensure_ascii=False, indent=2, default=str))
+        return 0
+    if args.command == "diagnostics":
+        state = State(Path(getattr(args, "state_file", None) or STATE_DEFAULT)).load()
+        report: dict[str, object] = {"agent_version": AGENT_VERSION}
+        inventory = collect_inventory()
+        report["platform"] = inventory.get("platform")
+        report["collectors"] = inventory.get("collectors_status")
+        ifaces, iface_error = collect_interfaces()
+        report["interfaces"] = {
+            "count": len(ifaces),
+            "names": [i.get("name") for i in ifaces],
+            "error": iface_error,
+        }
+        ports = collect_listening_ports()
+        report["listening_ports"] = {
+            "ok": bool(ports.get("ok")), "error": ports.get("error")}
+        arp = collect_arp_cache()
+        report["arp_cache"] = {"ok": bool(arp.get("ok")), "error": arp.get("error")}
+        state_file = state.path
+        report["state_file"] = {
+            "path": str(state_file),
+            "exists": state_file.exists(),
+            "credential_present": bool(state.agent_token),
+        }
+        server_url = getattr(args, "server_url", None) or state.data.get("server_url")
+        report["server"] = {"url": server_url, "reachable": None}
+        if args.ping_server and server_url:
+            try:
+                client = ApiClient(
+                    server_url, None, ca_bundle=os.environ.get("NETAGENT_CA_BUNDLE"))
+                client.request("GET", "/health", auth=False)
+                report["server"]["reachable"] = True
+            except ApiError as exc:
+                report["server"] = {"url": server_url, "reachable": False,
+                                    "error": str(exc)[:200]}
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
         return 0
     if args.command == "status":
         state = State(Path(state_path or STATE_DEFAULT)).load()

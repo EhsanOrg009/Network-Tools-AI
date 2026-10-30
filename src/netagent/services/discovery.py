@@ -144,11 +144,16 @@ def is_auto_discovery_target_authorized(
     db: Database, settings: Settings, target: str, *, now_epoch: float | None = None
 ) -> bool:
     """True when *target* (IP or CIDR) falls inside the effective discovery
-    scope (configured ∪ auto-authorized discovered)."""
+    scope: configured MONITOR_CIDRS/AUTHORIZED_TARGETS ∪ auto-authorized
+    discovered networks. This is the single policy question asked before any
+    auto-discovery-driven scan; ``validate_discovery_target`` enforces it at
+    the collector layer with the same inputs."""
     try:
         addr = ipaddress.ip_network(target, strict=False)
     except ValueError:
         return False
+    if settings.is_target_authorized(str(addr)):
+        return True
     for entry in auto_discovery_eligible_networks(db, settings, now_epoch=now_epoch):
         try:
             net = ipaddress.ip_network(entry["cidr"], strict=False)

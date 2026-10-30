@@ -1613,8 +1613,9 @@ class Database:
         return int(row["c"])
 
     def sweep_console_sessions(self, now_epoch: float | None = None) -> int:
-        """Mark expired/idle console sessions. Returns the number closed."""
+        """Mark expired (TTL) and idle console sessions. Returns the number closed."""
         now_epoch = now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+        closed = 0
         with self._lock:
             cur1 = self._conn.execute(
                 """
@@ -1624,8 +1625,35 @@ class Database:
                 """,
                 (_now_iso(), now_epoch),
             )
+            closed += max(cur1.rowcount, 0)
+            # idle timeout: no activity for longer than the session's configured
+            # idle window. Computed in Python (ISO timestamps, timezone offsets).
+            rows = self._conn.execute(
+                """
+                SELECT id, last_active_at, idle_timeout_seconds
+                FROM console_sessions
+                WHERE status IN ('creating', 'active')
+                  AND idle_timeout_seconds IS NOT NULL
+                  AND last_active_at IS NOT NULL
+                """
+            ).fetchall()
+            for row in rows:
+                try:
+                    last = datetime.fromisoformat(str(row["last_active_at"]))
+                    idle_s = int(row["idle_timeout_seconds"])
+                except (TypeError, ValueError):
+                    continue
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                if (now_epoch - last.timestamp()) > idle_s:
+                    cur2 = self._conn.execute(
+                        "UPDATE console_sessions SET status = 'expired', "
+                        "closed_at = COALESCE(closed_at, ?) WHERE id = ? AND status IN ('creating', 'active')",
+                        (_now_iso(), row["id"]),
+                    )
+                    closed += max(cur2.rowcount, 0)
             self._conn.commit()
-        return cur1.rowcount
+        return closed
 
     def next_console_seq(self, session_id: str) -> int:
         with self._lock:

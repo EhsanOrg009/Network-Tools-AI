@@ -129,6 +129,17 @@ class Settings(BaseSettings):
     agent_enrollment_token: str = ""
 
     # ------------------------------------------------------------------
+    # Automatic registration with administrator approval (v4)
+    # ------------------------------------------------------------------
+    # Un-enrolled agents may introduce themselves; the request lands in
+    # PENDING_APPROVAL until an administrator approves it from the dashboard.
+    allow_auto_registration: bool = True
+    enrollment_request_ttl_minutes: int = Field(default=1440, ge=10, le=7 * 24 * 60)
+    max_pending_enrollment_requests: int = Field(default=100, ge=1, le=1000)
+    # Sliding-window per-source-IP limit for the open registration endpoints.
+    registration_rate_limit_per_hour: int = Field(default=30, ge=1, le=1000)
+
+    # ------------------------------------------------------------------
     # Administrator control plane (v3) — disabled unless explicitly configured
     # ------------------------------------------------------------------
     # ADMIN_API_TOKEN (plaintext, >=16 chars) or ADMIN_API_TOKEN_SHA256.

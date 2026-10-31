@@ -56,6 +56,11 @@ EXPECTED_ENDPOINTS = {
     ("POST", "/api/admin/v1/console/sessions/{session_id}/terminate"),
     ("POST", "/api/admin/v1/enrollment-tokens"),
     ("GET", "/api/admin/v1/enrollment-tokens"),
+    ("POST", "/api/agent/v1/register"),
+    ("POST", "/api/agent/v1/register/{request_id}/claim"),
+    ("GET", "/api/admin/v1/enrollment-requests"),
+    ("POST", "/api/admin/v1/enrollment-requests/{request_id}/approve"),
+    ("POST", "/api/admin/v1/enrollment-requests/{request_id}/reject"),
     ("POST", "/api/admin/v1/tasks"),
     ("GET", "/api/admin/v1/tasks"),
     ("GET", "/api/admin/v1/tasks/{task_id}"),
@@ -367,10 +372,18 @@ def test_api_docs_is_rtl_with_ltr_technical_islands(client):
 
 def test_agent_and_admin_routes_require_bearer_in_docs(openapi):
     """Every agent/admin operation documents 401; admin-only families exist
-    under their own prefixes (separate credential domains)."""
+    under their own prefixes (separate credential domains).
+
+    Exemptions (documented policy, not exceptions to test):
+    - /register and /register/{id}/claim are intentionally open (they ARE the
+      pre-credential enrollment channel; abuse is bounded by rate limits and
+      admin approval, and claim requires the identity-key proof).
+    - /enroll is the token-based enrollment entry point (same reason)."""
     ops = _operations(openapi)
     for (method, path), op in ops.items():
-        if path.startswith("/api/agent/v1") and not path.endswith("/enroll"):
+        if path.startswith("/api/agent/v1") and not (
+                path.endswith("/enroll") or path.endswith("/register")
+                or path.endswith("/claim")):
             assert "401" in op["responses"], f"{method} {path}: 401 undocumented"
         if path.startswith("/api/admin/v1"):
             assert "401" in op["responses"], f"{method} {path}: 401 undocumented"

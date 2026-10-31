@@ -23,6 +23,7 @@ from netagent.schemas import (
     ConsoleCommandCreate,
     ConsoleSessionCreate,
     DiagnosticTaskCreate,
+    EnrollmentRejectBody,
     EnrollmentTokenCreate,
 )
 from netagent.security import (
@@ -231,6 +232,167 @@ def list_enrollment_tokens(
     db, _ = _ctx(request)
     _guard(request, authorization, x_admin_actor)
     return {"items": db.list_enrollment_tokens()}
+
+
+# ---------------------------------------------------------------------------
+# Enrollment requests (auto-registration awaiting admin approval)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/enrollment-requests",
+    tags=["مدیریت مدیر شبکه"],
+    summary="فهرست درخواست‌های ثبت‌نام خودکار",
+    description=(
+        "درخواست‌های معرفی عامل‌ها با فیلتر وضعیت: `PENDING_APPROVAL` (در انتظار "
+        "تأیید)، `APPROVED` (تأییدشده تا تکمیل توسط عامل)، `ENROLLED` (تکمیل‌شده)، "
+        "`REJECTED` و `EXPIRED`. اطلاعات هر درخواست همان موارد **اعلامی** عامل "
+        "است و تا تأیید مدیر هیچ اعتباری ندارد."
+    ),
+    responses=_responses(
+        "فهرست درخواست‌ها با تعداد کل.",
+        {"items": [{
+            "id": "9f2c41ba07c34d5e8a1b2c3d4e5f6071",
+            "hostname": "workstation-15",
+            "platform": {"os_family": "Windows", "os_name": "Windows 11 Pro"},
+            "agent_version": "1.0.0",
+            "claimed_ips": ["192.168.1.51"],
+            "mac": "d8:96:95:11:22:33",
+            "gateway": "192.168.1.1",
+            "status": "PENDING_APPROVAL",
+            "requested_at": "2026-10-31T10:00:00+00:00",
+            "expires_at": "2026-11-01T10:00:00+00:00",
+        }], "total": 1, "limit": 100, "offset": 0},
+    ),
+)
+def list_enrollment_requests(
+    request: Request,
+    status: str | None = Query(
+        None,
+        description="فیلتر وضعیت: PENDING_APPROVAL یا APPROVED یا ENROLLED یا REJECTED یا EXPIRED.",
+    ),
+    limit: int = Query(100, ge=1, le=500, description="حداکثر تعداد ردیف."),
+    offset: int = Query(0, ge=0, description="صفحه‌بندی."),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    db.expire_due_enrollment_requests()
+    items, total = db.list_enrollment_requests(status=status, limit=limit, offset=offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.post(
+    "/enrollment-requests/{request_id}/approve",
+    tags=["مدیریت مدیر شبکه"],
+    summary="تأیید درخواست ثبت‌نام عامل",
+    description=(
+        "مدیر اطلاعات اعلامی را بازبینی و تأیید می‌کند. پس از اولین claim عامل "
+        "(با اثبات کلید هویت)، شناسه‌ی دائمی و اعتبارنامه‌ی اختصاصی صادر می‌شود "
+        "و رکورد به `ENROLLED` می‌رود. تأیید به‌تنهایی اعتبارنامه‌ای به مدیر "
+        "نمی‌دهد؛ اعتبارنامه فقط در کانال عامل تحویل می‌شود."
+    ),
+    responses=_responses(
+        "رکورد درخواست پس از تأیید.",
+        {"id": "9f2c41ba07c34d5e8a1b2c3d4e5f6071", "status": "APPROVED",
+         "reviewed_by": "net-admin", "reviewed_at": "2026-10-31T10:05:00+00:00"},
+        not_found="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.",
+        conflict=True,
+    ),
+)
+def approve_enrollment_request(
+    request: Request,
+    request_id: str = Path(description="شناسه‌ی درخواست.",
+                           examples=["9f2c41ba07c34d5e8a1b2c3d4e5f6071"]),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    reviewed = db.review_enrollment_request(request_id, approve=True, reviewed_by=actor)
+    if reviewed is None:
+        raise HTTPException(status_code=409,
+                            detail="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.")
+    db.record_audit(actor=actor, action="enrollment_request.approve", target=request_id,
+                    detail={"hostname": reviewed.get("hostname")})
+    return reviewed
+
+
+@router.post(
+    "/enrollment-requests/{request_id}/reject",
+    tags=["مدیریت مدیر شبکه"],
+    summary="رد درخواست ثبت‌نام عامل",
+    description=(
+        "درخواست رد می‌شود و دلیل آن برای سابقه ثبت می‌گردد. عاملِ ردشده هرگز "
+        "به‌عنوان دستگاه تأییدشده شناخته نمی‌شود، تسکی دریافت نمی‌کند و claim "
+        "بعدی فقط وضعیت `REJECTED` با دلیل را می‌بیند."
+    ),
+    responses=_responses(
+        "رکورد درخواست پس از رد.",
+        {"id": "9f2c41ba07c34d5e8a1b2c3d4e5f6071", "status": "REJECTED",
+         "reviewed_by": "net-admin", "reject_reason": "دستگاه ناشناس است"},
+        not_found="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.",
+        conflict=True,
+    ),
+)
+def reject_enrollment_request(
+    request: Request,
+    body: EnrollmentRejectBody,
+    request_id: str = Path(description="شناسه‌ی درخواست.",
+                           examples=["9f2c41ba07c34d5e8a1b2c3d4e5f6071"]),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    reviewed = db.review_enrollment_request(request_id, approve=False, reviewed_by=actor,
+                                            reason=body.reason)
+    if reviewed is None:
+        raise HTTPException(status_code=409,
+                            detail="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.")
+    db.record_audit(actor=actor, action="enrollment_request.reject", target=request_id,
+                    detail={"hostname": reviewed.get("hostname"), "reason": body.reason})
+    return reviewed
 
 
 # ---------------------------------------------------------------------------

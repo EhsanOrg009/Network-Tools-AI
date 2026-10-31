@@ -40,6 +40,7 @@ import os
 import platform
 import random
 import re
+import secrets
 import socket
 import ssl
 import subprocess
@@ -48,6 +49,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 AGENT_VERSION = "1.0.0"
@@ -1038,6 +1040,100 @@ class EndpointAgent:
             ips.extend((iface.get("ipv4") or []) + (iface.get("ipv6") or []))
         return ips[:20]
 
+    # -- automatic registration with administrator approval -------------------
+
+    def self_register(self) -> str:
+        """Introduce this endpoint to the core WITHOUT any manual token.
+
+        The server stores the request as PENDING_APPROVAL; an administrator
+        must approve it from the dashboard before any credential is issued.
+        The local identity key never leaves this file except through the TLS
+        channel during claim polls. Returns the request_id."""
+        ifaces, _ = collect_interfaces()
+        mac = next((i.get("mac") for i in ifaces
+                    if i.get("mac") and i.get("classification") != "loopback"), None)
+        gateway = next((i.get("gateway") for i in ifaces if i.get("gateway")), None)
+        request_id = self.state.data.get("auto_request_id") or uuid.uuid4().hex
+        identity_key = self.state.data.get("auto_identity_key")
+        if not identity_key:
+            identity_key = secrets.token_hex(32)
+        identity_key_hash = hashlib.sha256(identity_key.encode("utf-8")).hexdigest()
+        response = self.api().request("POST", "/api/agent/v1/register", auth=False, payload={
+            "request_id": request_id,
+            "identity_key_hash": identity_key_hash,
+            "hostname": platform.node() or None,
+            "platform": collect_platform(),
+            "agent_version": AGENT_VERSION,
+            "claimed_ips": self._quick_ips(),
+            "mac": mac,
+            "gateway": gateway,
+        })
+        self.state.data.update({
+            "server_url": self.server_url,
+            "auto_request_id": request_id,
+            "auto_identity_key": identity_key,
+            "auto_registered_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        })
+        self.state.save()
+        return str(response.get("request_id") or request_id)
+
+    def poll_registration(self) -> int | None:
+        """Ask the core for the registration decision.
+
+        Returns None when still pending/unknown (keep the loop running), 0
+        when enrollment is complete, 2 when the agent must stop (rejected or
+        credential already consumed elsewhere)."""
+        request_id = self.state.data.get("auto_request_id")
+        identity_key = self.state.data.get("auto_identity_key")
+        if not request_id or not identity_key:
+            request_id = self.self_register()
+        try:
+            response = self.api().request(
+                "POST", f"/api/agent/v1/register/{request_id}/claim", auth=False,
+                payload={"identity_key": identity_key},
+            )
+        except ApiError as exc:
+            if exc.status == 404:
+                # request expired server-side → announce again
+                self.state.data.pop("auto_request_id", None)
+                self.state.save()
+                return None
+            raise
+        status = response.get("status")
+        if status == "APPROVED":
+            self.state.data.update({
+                "agent_id": response["agent_id"],
+                "agent_token": response["agent_token"],
+                "enrolled_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "executed_task_ids": [],
+                "seen_envelope_nonces": [],
+                "auto_pending_notice_shown": None,
+            })
+            self.state.save()
+            print(f"ثبت‌نام تأیید و تکمیل شد: agent_id={response['agent_id']}")
+            print("اعتبارنامه در فایل وضعیت ذخیره شد؛ مقدار توکن دوباره نمایش داده نمی‌شود.")
+            return 0
+        if status == "PENDING_APPROVAL":
+            if not self.state.data.get("auto_pending_notice_shown"):
+                print("درخواست ثبت‌نام ارسال شد؛ در انتظار تأیید مدیر شبکه از داشبورد…")
+                self.state.data["auto_pending_notice_shown"] = True
+                self.state.save()
+            return None
+        if status == "REJECTED":
+            print("درخواست ثبت‌نام رد شد؛ دلیل: "
+                  f"{response.get('reason') or 'مشخص نشده'}", file=sys.stderr)
+            return 2
+        if status == "EXPIRED":
+            self.state.data.pop("auto_request_id", None)
+            self.state.save()
+            return None
+        if status == "ENROLLED":
+            print("این درخواست قبلاً تکمیل شده اما اعتبارنامه محلی موجود نیست؛ ",
+                  "برای ثبت‌نام مجدد، عامل قدیمی را در سرور Revoke کنید.",
+                  file=sys.stderr)
+            return 2
+        return None
+
     # -- loop steps ------------------------------------------------------------
 
     def heartbeat(self) -> dict:
@@ -1169,22 +1265,46 @@ class EndpointAgent:
     def run(self, once: bool = False) -> int:
         client = self.api()
         if not self.state.agent_id or not self.state.agent_token:
-            print("عامل ثبت‌نام نشده است؛ ابتدا enroll را اجرا کنید.", file=sys.stderr)
-            return 2
+            # No credential yet: introduce this endpoint automatically and let
+            # the run loop poll for the administrator's approval decision.
+            print("عامل ثبت‌نام نشده است؛ معرفی خودکار به مرکز انجام می‌شود…")
+            try:
+                self.self_register()
+            except ApiError as exc:
+                if exc.status == 403:
+                    print("ثبت‌نام خودکار روی سرور غیرفعال است؛ یا توکن یک‌بارمصرف "
+                          "به‌صورت دستی با enroll وارد کنید.", file=sys.stderr)
+                    return 2
+                print(f"ارتباط با مرکز برقرار نشد ({exc})؛ دوباره تلاش کنید.",
+                      file=sys.stderr)
+                return 2
         attempt = 0
+        last_claim_poll = 0.0
         while True:
             try:
-                if time.time() - self.last_heartbeat >= self.heartbeat_interval:
-                    hb = self.heartbeat()
-                    # the server may adjust the cadence centrally (e.g. probe storms
-                    # quieted): honor it within sane bounds, never faster than 5s.
-                    hb_interval = hb.get("heartbeat_interval_seconds")
-                    if isinstance(hb_interval, (int, float)) and hb_interval >= 1:
-                        self.heartbeat_interval = min(3600.0, max(5.0, float(hb_interval)))
-                    if hb.get("inventory_due") or \
-                            time.time() - self.last_inventory >= self.inventory_interval:
-                        self.push_inventory()
-                self.poll_and_execute_task()
+                if not self.state.agent_token:
+                    # pre-enrollment: poll the registration decision on a slow
+                    # cadence; diagnostics stay off until approved
+                    claim_cadence = max(10.0, self.poll_interval * 4)
+                    if time.time() - last_claim_poll >= claim_cadence:
+                        last_claim_poll = time.time()
+                        outcome = self.poll_registration()
+                        if outcome == 0:
+                            continue  # enrolled now: heartbeat on the next pass
+                        if outcome == 2:
+                            return 2
+                if self.state.agent_token:
+                    if time.time() - self.last_heartbeat >= self.heartbeat_interval:
+                        hb = self.heartbeat()
+                        # the server may adjust the cadence centrally (e.g.
+                        # probe storms quieted): honor it, never faster than 5s.
+                        hb_interval = hb.get("heartbeat_interval_seconds")
+                        if isinstance(hb_interval, (int, float)) and hb_interval >= 1:
+                            self.heartbeat_interval = min(3600.0, max(5.0, float(hb_interval)))
+                        if hb.get("inventory_due") or \
+                                time.time() - self.last_inventory >= self.inventory_interval:
+                            self.push_inventory()
+                    self.poll_and_execute_task()
                 attempt = 0
             except ApiError as exc:
                 attempt += 1
@@ -1217,7 +1337,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     enroll = sub.add_parser("enroll", help="ثبت‌نام با توکن یک‌بارمصرف")
-    enroll.add_argument("--enrollment-token", required=True)
+    enroll.add_argument("--enrollment-token", default=None)
     enroll.add_argument("--server-url", default=None)
     enroll.add_argument("--state-file", default=None)
     enroll.add_argument("--allow-insecure-http", action="store_true",
@@ -1324,6 +1444,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "enroll":
         if not args.server_url:
             print("--server-url لازم است.", file=sys.stderr)
+            return 2
+        if not args.enrollment_token:
+            print("برای ثبت‌نام بدون توکن، زیرفرمان run را اجرا کنید؛ عامل خودش را "
+                  "معرفی می‌کند و مدیر شبکه از داشبورد تأیید می‌کند.", file=sys.stderr)
             return 2
         try:
             agent.enroll(args.enrollment_token)

@@ -421,3 +421,60 @@ class ConsoleCommandCreate(BaseModel):
     }
 
     code: str = Field(min_length=1, description="کد پایتون برای اجرای ترتیبی در نشست؛ state بین دستورها حفظ می‌شود.")
+
+
+# ---------------------------------------------------------------------------
+# Automatic registration with administrator approval (v4)
+# ---------------------------------------------------------------------------
+
+_REQUEST_ID_RE = r"^[a-f0-9]{16,64}$"
+
+
+class RegistrationRequest(BaseModel):
+    """معرفی خودکار عامل بدون توکن؛ درخواست در وضعیت PENDING_APPROVAL ذخیره می‌شود."""
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "request_id": "9f2c41ba07c34d5e8a1b2c3d4e5f6071",
+                    "identity_key_hash": "3d1e…" ,
+                    "hostname": "workstation-15",
+                    "platform": {"os_family": "Windows", "os_name": "Windows 11 Pro",
+                                 "os_version": "10.0.22631", "kernel": "…", "arch": "AMD64"},
+                    "agent_version": "1.0.0",
+                    "claimed_ips": ["192.168.1.51"],
+                    "mac": "d8:96:95:11:22:33",
+                    "gateway": "192.168.1.1",
+                }
+            ]
+        }
+    }
+
+    request_id: str = Field(
+        pattern=_REQUEST_ID_RE,
+        description="شناسه‌ی یکتای درخواست که خود عامل تولید می‌کند (hex 16-64 نویسه).",
+    )
+    identity_key_hash: str = Field(
+        min_length=64, max_length=64,
+        description="SHA-256 hex کلید هویت تصادفیِ محلی عامل؛ کلید اصلی هرگز به سرور ارسال نمی‌شود.",
+    )
+    hostname: str | None = Field(default=None, max_length=255)
+    platform: EndpointPlatformInfo = Field(default_factory=EndpointPlatformInfo)
+    agent_version: str | None = Field(default=None, max_length=32)
+    claimed_ips: list[str] = Field(default_factory=list, description="IPهای اعلامی (اطلاعات اعلام‌شده، نه تأییدشده).")
+    mac: str | None = Field(default=None, max_length=64)
+    gateway: str | None = Field(default=None, max_length=64)
+
+
+class ClaimRequest(BaseModel):
+    """پیگیری وضعیت درخواست ثبت‌نام با اثبات مالکیت (کلید هویت)."""
+
+    identity_key: str = Field(
+        min_length=16, max_length=256,
+        description="کلید هویت تصادفی عامل — صرفاً برای تطبیق هش؛ فقط یک‌بار در پاسخ APPROVED اعتبارنامه صادر می‌شود.",
+    )
+
+
+class EnrollmentRejectBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=500, description="دلیل رد (برای سابقه).")

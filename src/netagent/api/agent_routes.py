@@ -21,9 +21,11 @@ from fastapi.responses import JSONResponse
 from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import (
+    ClaimRequest,
     EnrollRequest,
     HeartbeatRequest,
     InventoryRequest,
+    RegistrationRequest,
     SimpleAck,
     TaskResultRequest,
 )
@@ -227,6 +229,153 @@ def _iso_to_epoch(value: str | None) -> float:
         return datetime.fromisoformat(value).timestamp()
     except ValueError:
         return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Automatic registration (no token; administrator approves from the dashboard)
+# ---------------------------------------------------------------------------
+
+from netagent.services.enrollment import (  # noqa: E402
+    RegistrationError,
+    ClaimError,
+    _RateLimiter,
+    claim_request,
+    register_request,
+)
+
+# Per-source-IP sliding window for the two open endpoints (bounded memory).
+# The claim endpoint is polled by waiting agents (default poll ~5s), so its
+# ceiling is much higher than registration's.
+_registration_limiter = _RateLimiter(max_events=30, window_seconds=3600)
+_claim_limiter = _RateLimiter(max_events=1200, window_seconds=3600)
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+@router.post(
+    "/register",
+    tags=["Endpoint Agent"],
+    summary="معرفی خودکار عامل بدون توکن (در انتظار تأیید مدیر)",
+    description=(
+        "عاملِ ثبت‌نام‌نشده اطلاعات اولیه‌ی **اعلامی** خود را می‌فرستد و سرور "
+        "درخواست را با وضعیت `PENDING_APPROVAL` ذخیره می‌کند. هیچ اعتبارنامه‌ای "
+        "صادر نمی‌شود تا مدیر شبکه از داشبورد تأیید کند. ثبت‌نام دوباره‌ی همان "
+        "هویت (با همان `identity_key_hash`) درخواست قبلی را به‌روزرسانی می‌کند، "
+        "نه رکورد جدید. محدودیت نرخ بر اساس IP مبدأ اعمال می‌شود و درخواست "
+        "بی‌پاسخ منقضی می‌گردد. این نقطه‌پایان باز است اما فقط اطلاعات "
+        "غیرحساس و بدون اعتماد ذخیره می‌کند."
+    ),
+    responses={
+        200: {
+            "description": "درخواست ثبت/به‌روزرسانی شد؛ وضعیت فعلی برمی‌گردد.",
+            "content": {"application/json": {"examples": {"default": {"value": {
+                "request_id": "9f2c41ba07c34d5e8a1b2c3d4e5f6071",
+                "status": "PENDING_APPROVAL",
+                "expires_at": "2026-11-01T10:00:00+00:00",
+                "poll_hint": "POST /api/agent/v1/register/{request_id}/claim",
+            }}}}},
+        },
+        403: {
+            "description": "ثبت‌نام خودکار غیرفعال است یا این هویت قبلاً ثبت شده است.",
+            "content": {"application/json": {"examples": {"default": {"value": {
+                "detail": "ثبت‌نام خودکار روی این سرور غیرفعال است (ALLOW_AUTO_REGISTRATION)."}}}}},
+        },
+        422: _responses("", {})[422],
+        429: {
+            "description": "محدودیت نرخ از این IP مبدأ.",
+            "content": {"application/json": {"examples": {"default": {"value": {
+                "detail": "تعداد درخواست‌های ثبت‌نام از این IP بیش از حد مجاز است."}}}}},
+        },
+    },
+)
+def register(
+    request: Request,
+    body: RegistrationRequest,
+) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    _registration_limiter.max_events = settings.registration_rate_limit_per_hour
+    if not _registration_limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429,
+                            detail="تعداد درخواست‌های ثبت‌نام از این IP بیش از حد مجاز است.")
+    try:
+        stored = register_request(
+            db, settings,
+            request_id=body.request_id,
+            identity_key_hash=body.identity_key_hash,
+            hostname=body.hostname,
+            platform=body.platform,
+            agent_version=body.agent_version,
+            claimed_ips=body.claimed_ips,
+            mac=body.mac,
+            gateway=body.gateway,
+        )
+    except RegistrationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {
+        "request_id": stored["id"],
+        "status": stored["status"],
+        "expires_at": stored.get("expires_at"),
+        "poll_hint": "POST /api/agent/v1/register/{request_id}/claim",
+    }
+
+
+@router.post(
+    "/register/{request_id}/claim",
+    tags=["Endpoint Agent"],
+    summary="پیگیری وضعیت ثبت‌نام و دریافت اعتبارنامه پس از تأیید",
+    description=(
+        "عامل با کلید هویت محلی خود وضعیت درخواست را می‌پرسد؛ تطبیق هش، مالکیت "
+        "همان درخواست‌دهنده‌ی اولیه را اثبات می‌کند. تا تأیید مدیر، پاسخ "
+        "`PENDING_APPROVAL` است. پس از تأیید، **فقط یک‌بار** `agent_id` و "
+        "`agent_token` صادر و عامل دائمی ساخته می‌شود؛ فراخوانی‌های بعدی فقط "
+        "`ENROLLED` برمی‌گردانند. درخواست ردشده دلیل رد را می‌دهد و هیچ "
+        "اعتبارنامه‌ای صادر نمی‌شود."
+    ),
+    responses={
+        200: {
+            "description": "وضعیت درخواست؛ در حالت APPROVED اعتبارنامه یک‌بارمصرف داخل پاسخ است.",
+            "content": {"application/json": {"examples": {
+                "default": {"value": {"status": "PENDING_APPROVAL",
+                                      "note": "درخواست در انتظار تأیید مدیر شبکه است."}},
+                "approved": {"value": {"status": "APPROVED",
+                                       "agent_id": "agt_9f2c41ba07c3",
+                                       "agent_token": "agt_… (نمونه؛ مقدار واقعی یک‌بار می‌آید)"}},
+                "rejected": {"value": {"status": "REJECTED",
+                                       "reason": "دستگاه ناشناس است"}},
+            }}},
+        },
+        404: {
+            "description": "درخواستی با این شناسه وجود ندارد.",
+            "content": {"application/json": {"examples": {"default": {"value": {
+                "detail": "درخواست ثبت‌نام یافت نشد."}}}}},
+        },
+        422: _responses("", {})[422],
+        429: {
+            "description": "محدودیت نرخ از این IP مبدأ.",
+            "content": {"application/json": {"examples": {"default": {"value": {
+                "detail": "تعداد درخواست‌ها از این IP بیش از حد مجاز است."}}}}},
+        },
+    },
+)
+def claim(
+    request: Request,
+    body: ClaimRequest,
+    request_id: str = Path(description="شناسه‌ی درخواست دریافتی از POST /register.",
+                           examples=["9f2c41ba07c34d5e8a1b2c3d4e5f6071"]),
+) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    if not _claim_limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429,
+                            detail="تعداد درخواست‌ها از این IP بیش از حد مجاز است.")
+    try:
+        result = claim_request(db, settings, request_id=request_id, identity_key=body.identity_key)
+    except ClaimError as exc:
+        message = str(exc)
+        status = 404 if "یافت نشد" in message else 403
+        raise HTTPException(status_code=status, detail=message) from exc
+    return result
 
 
 @router.post(

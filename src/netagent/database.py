@@ -269,6 +269,28 @@ CREATE TABLE IF NOT EXISTS enrollment_tokens (
     used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_enrolltokens_exp ON enrollment_tokens(expiry_epoch);
+
+CREATE TABLE IF NOT EXISTS enrollment_requests (
+    id TEXT PRIMARY KEY,
+    identity_key_hash TEXT NOT NULL UNIQUE,
+    hostname TEXT,
+    platform_json TEXT,
+    agent_version TEXT,
+    claimed_ips_json TEXT,
+    mac TEXT,
+    gateway TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING_APPROVAL',
+    requested_at TEXT NOT NULL,
+    requested_epoch REAL NOT NULL,
+    updated_at TEXT,
+    expires_at TEXT,
+    expiry_epoch REAL,
+    reviewed_by TEXT,
+    reviewed_at TEXT,
+    reject_reason TEXT,
+    enrolled_agent_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_enrollreq_status ON enrollment_requests(status, requested_epoch);
 """
 
 
@@ -933,23 +955,36 @@ class Database:
     ) -> dict[str, Any]:
         now = _now_iso()
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO endpoint_agents(
-                    id, hostname, platform, agent_version, status, token_hash,
-                    enrolled_at, enrolled_origin, heartbeat_interval,
-                    capabilities_json, last_heartbeat_at, last_heartbeat_epoch
-                ) VALUES(?,?,?,?, 'enrolled', ?,?,?,?,?,?,?)
-                """,
-                (
-                    agent_id, hostname, platform, agent_version, token_hash, now,
-                    origin, heartbeat_interval,
-                    json.dumps(capabilities, ensure_ascii=False), now,
-                    datetime.now(timezone.utc).timestamp(),
-                ),
+            self._insert_agent_row(
+                agent_id=agent_id, token_hash=token_hash, hostname=hostname,
+                platform=platform, agent_version=agent_version, origin=origin,
+                heartbeat_interval=heartbeat_interval, capabilities=capabilities,
+                now=now,
             )
             self._conn.commit()
         return self.get_agent(agent_id)  # type: ignore[return-value]
+
+    def _insert_agent_row(
+        self, *, agent_id: str, token_hash: str, hostname: str | None,
+        platform: str | None, agent_version: str | None, origin: str | None,
+        heartbeat_interval: int, capabilities: list[str], now: str,
+    ) -> None:
+        """Plain INSERT (must be called while ``self._lock`` is held)."""
+        self._conn.execute(
+            """
+            INSERT INTO endpoint_agents(
+                id, hostname, platform, agent_version, status, token_hash,
+                enrolled_at, enrolled_origin, heartbeat_interval,
+                capabilities_json, last_heartbeat_at, last_heartbeat_epoch
+            ) VALUES(?,?,?,?, 'enrolled', ?,?,?,?,?,?,?)
+            """,
+            (
+                agent_id, hostname, platform, agent_version, token_hash, now,
+                origin, heartbeat_interval,
+                json.dumps(capabilities, ensure_ascii=False), now,
+                datetime.now(timezone.utc).timestamp(),
+            ),
+        )
 
     @staticmethod
     def _agent_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -1464,6 +1499,295 @@ class Database:
             cur = self._conn.execute(
                 "DELETE FROM enrollment_tokens WHERE expiry_epoch < ? - 7 * 86400",
                 (now_epoch,),
+            )
+            self._conn.commit()
+        return cur.rowcount
+
+    # -- enrollment requests (auto-registration with admin approval) -----------
+
+    @staticmethod
+    def _enrollment_request_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        for col, key in (("platform_json", "platform"), ("claimed_ips_json", "claimed_ips")):
+            if d.get(col):
+                try:
+                    d[key] = json.loads(d[col])
+                except (TypeError, ValueError):
+                    d[key] = None
+            d.pop(col, None)
+        return d
+
+    def create_enrollment_request(
+        self,
+        *,
+        request_id: str,
+        identity_key_hash: str,
+        hostname: str | None,
+        platform: dict[str, Any],
+        agent_version: str | None,
+        claimed_ips: list[str],
+        mac: str | None,
+        gateway: str | None,
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        now = _now_iso()
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        expiry_epoch = now_epoch + max(60, int(ttl_seconds))
+        expiry_iso = datetime.fromtimestamp(expiry_epoch, timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO enrollment_requests(
+                    id, identity_key_hash, hostname, platform_json, agent_version,
+                    claimed_ips_json, mac, gateway, status,
+                    requested_at, requested_epoch, updated_at, expires_at, expiry_epoch
+                ) VALUES(?,?,?,?,?,?,?,?, 'PENDING_APPROVAL', ?,?,?,?,?)
+                """,
+                (
+                    request_id, identity_key_hash, hostname,
+                    json.dumps(platform, ensure_ascii=False, default=str),
+                    agent_version,
+                    json.dumps(claimed_ips, ensure_ascii=False) if claimed_ips else None,
+                    mac, gateway, now, now_epoch, now, expiry_iso, expiry_epoch,
+                ),
+            )
+            self._conn.commit()
+        return self.get_enrollment_request(request_id)  # type: ignore[return-value]
+
+    def get_enrollment_request(self, request_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM enrollment_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+        return self._enrollment_request_row_to_dict(row) if row else None
+
+    def get_enrollment_request_by_identity_hash(self, identity_key_hash: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM enrollment_requests WHERE identity_key_hash = ?",
+                (identity_key_hash,),
+            ).fetchone()
+        return self._enrollment_request_row_to_dict(row) if row else None
+
+    def refresh_enrollment_request(
+        self,
+        request_id: str,
+        *,
+        hostname: str | None,
+        platform: dict[str, Any],
+        agent_version: str | None,
+        claimed_ips: list[str],
+        mac: str | None,
+        gateway: str | None,
+        expiry_epoch: float,
+        identity_key_hash: str | None = None,
+    ) -> None:
+        """A re-introducing agent refreshes its pending request in place.
+
+        ``identity_key_hash`` re-binds the proof key (used when the agent kept
+        its ``request_id`` but regenerated the identity key); it never changes
+        the request row's id, so re-announces cannot create extra rows."""
+        now = _now_iso()
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        expiry_iso = datetime.fromtimestamp(expiry_epoch, timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE enrollment_requests SET
+                    hostname = ?, platform_json = ?, agent_version = ?,
+                    claimed_ips_json = ?, mac = ?, gateway = ?,
+                    identity_key_hash = COALESCE(?, identity_key_hash),
+                    requested_at = ?, requested_epoch = ?,
+                    expires_at = ?, expiry_epoch = ?, updated_at = ?
+                WHERE id = ? AND status = 'PENDING_APPROVAL'
+                """,
+                (
+                    hostname, json.dumps(platform, ensure_ascii=False, default=str),
+                    agent_version,
+                    json.dumps(claimed_ips, ensure_ascii=False) if claimed_ips else None,
+                    mac, gateway, identity_key_hash, now, now_epoch,
+                    expiry_iso, expiry_epoch, now,
+                    request_id,
+                ),
+            )
+            self._conn.commit()
+
+    def review_enrollment_request(
+        self, request_id: str, *, approve: bool, reviewed_by: str, reason: str | None = None
+    ) -> dict[str, Any] | None:
+        now = _now_iso()
+        status = "APPROVED" if approve else "REJECTED"
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE enrollment_requests SET status = ?, reviewed_by = ?,
+                       reviewed_at = ?, reject_reason = ?, updated_at = ?
+                WHERE id = ? AND status = 'PENDING_APPROVAL'
+                """,
+                (status, reviewed_by, now, None if approve else (reason or None), now, request_id),
+            )
+            self._conn.commit()
+        if cur.rowcount != 1:
+            return None
+        return self.get_enrollment_request(request_id)
+
+    def mark_enrollment_request_enrolled(self, request_id: str, *, agent_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE enrollment_requests SET status = 'ENROLLED',
+                       enrolled_agent_id = ?, updated_at = ?
+                WHERE id = ? AND status = 'APPROVED'
+                """,
+                (agent_id, _now_iso(), request_id),
+            )
+            self._conn.commit()
+
+    def revive_enrollment_request(
+        self, request_id: str, *, identity_key_hash: str, hostname: str | None,
+        platform: dict[str, Any],
+        agent_version: str | None, claimed_ips: list[str], mac: str | None,
+        gateway: str | None, expiry_epoch: float,
+    ) -> None:
+        """Re-open an existing request row (REJECTED, or ENROLLED whose agent
+        was revoked): back to PENDING_APPROVAL with fresh declared data. The
+        previous decision/audit rows are preserved in admin_audit."""
+        expiry_iso = datetime.fromtimestamp(expiry_epoch, timezone.utc).isoformat(
+            timespec="seconds")
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE enrollment_requests SET
+                    status = 'PENDING_APPROVAL', hostname = ?, platform_json = ?,
+                    agent_version = ?, claimed_ips_json = ?, mac = ?, gateway = ?,
+                    identity_key_hash = ?,
+                    requested_at = ?, requested_epoch = ?, updated_at = ?,
+                    expires_at = ?, expiry_epoch = ?,
+                    reviewed_by = NULL, reviewed_at = NULL,
+                    reject_reason = NULL
+                WHERE id = ?
+                """,
+                (
+                    hostname,
+                    json.dumps(platform, ensure_ascii=False, default=str),
+                    agent_version,
+                    json.dumps(claimed_ips, ensure_ascii=False) if claimed_ips else None,
+                    mac, gateway,
+                    identity_key_hash,
+                    _now_iso(), datetime.now(timezone.utc).timestamp(), _now_iso(),
+                    expiry_iso, expiry_epoch, request_id,
+                ),
+            )
+            self._conn.commit()
+
+    def complete_enrollment_request(
+        self,
+        request_id: str,
+        *,
+        agent_id: str,
+        token_hash: str,
+        hostname: str | None,
+        platform_os_family: str | None,
+        agent_version: str | None,
+        heartbeat_interval: int,
+        capabilities: list[str],
+    ) -> tuple[str, str | None]:
+        """Atomically turn an APPROVED request into a permanent agent.
+
+        The APPROVED→ENROLLED transition, the agent INSERT and the assignment
+        happen inside one locked block, so two concurrent claim pollers can
+        never produce two agents from one approval. Returns
+        (outcome, existing_agent_id): outcome is ``created`` (this call did
+        the work), ``already_enrolled`` (another claim got there first —
+        existing_agent_id is set), or ``unavailable`` (request no longer
+        APPROVED, e.g. reviewed/expired between calls)."""
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM enrollment_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+            if row is None:
+                return ("unavailable", None)
+            status = row["status"]
+            if status == "ENROLLED":
+                return ("already_enrolled", row["enrolled_agent_id"])
+            if status != "APPROVED":
+                return ("unavailable", None)
+            self._insert_agent_row(
+                agent_id=agent_id, token_hash=token_hash, hostname=hostname,
+                platform=platform_os_family, agent_version=agent_version,
+                origin="auto-registration", heartbeat_interval=heartbeat_interval,
+                capabilities=capabilities, now=now,
+            )
+            self._conn.execute(
+                """
+                UPDATE enrollment_requests SET status = 'ENROLLED',
+                       enrolled_agent_id = ?, updated_at = ? WHERE id = ?
+                """,
+                (agent_id, now, request_id),
+            )
+            self._conn.commit()
+        return ("created", None)
+
+    def expire_due_enrollment_requests(self) -> int:
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE enrollment_requests SET status = 'EXPIRED', updated_at = ?
+                WHERE status = 'PENDING_APPROVAL' AND expiry_epoch < ?
+                """,
+                (_now_iso(), now_epoch),
+            )
+            self._conn.commit()
+        return cur.rowcount
+
+    def count_enrollment_requests(self, *, status: str | None = None) -> int:
+        cond, params = "", []
+        if status:
+            cond = "WHERE status = ?"
+            params.append(status)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS c FROM enrollment_requests {cond}", params
+            ).fetchone()
+        return int(row["c"])
+
+    def list_enrollment_requests(
+        self, *, status: str | None = None, limit: int = 100, offset: int = 0
+    ) -> tuple[list[dict[str, Any]], int]:
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS c FROM enrollment_requests {cond}", params
+            ).fetchone()["c"]
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM enrollment_requests {cond}
+                ORDER BY requested_epoch DESC LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+        return [self._enrollment_request_row_to_dict(r) for r in rows], int(total)
+
+    def prune_enrollment_requests(self, keep: int = 500) -> int:
+        """Bounded history: drop oldest terminal requests beyond ``keep``."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                DELETE FROM enrollment_requests
+                WHERE status IN ('REJECTED', 'EXPIRED', 'ENROLLED') AND id NOT IN (
+                    SELECT id FROM enrollment_requests
+                    WHERE status IN ('REJECTED', 'EXPIRED', 'ENROLLED')
+                    ORDER BY requested_epoch DESC LIMIT ?
+                )
+                """,
+                (keep,),
             )
             self._conn.commit()
         return cur.rowcount

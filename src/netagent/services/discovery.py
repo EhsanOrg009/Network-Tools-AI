@@ -83,9 +83,14 @@ def auto_discovery_eligible_networks(
             continue
         # Only directly-connected observations from physical/unknown (i.e. not
         # explicitly virtual/vpn/loopback) interfaces count as reporters.
+        # Administratively excluded interfaces never report, independently
+        # of whether the ingest path dropped them already.
+        excluded_ifaces = {i.lower() for i in settings.discovery_excluded_interface_list}
         reporters: dict[str, set[str]] = {}
         for obs in observations:
             if not obs.get("connected"):
+                continue
+            if (obs.get("interface") or "").lower() in excluded_ifaces:
                 continue
             iface_class = classify_iface_key(obs)
             if iface_class in ("virtual", "vpn", "loopback"):

@@ -180,6 +180,14 @@ def _ctx(request: Request) -> tuple[Database, Settings, Any]:
                     "model": "gemma-4-e2b-it-q4_0--2-:latest",
                 },
                 "monitor_thread": {"ok": True, "running": True},
+                "endpoint_agents": {
+                    "ok": True,
+                    "active": 3,
+                    "stale": 1,
+                    "revoked": 0,
+                    "total": 4,
+                    "heartbeat_timeout_seconds": 180,
+                },
                 "diagnostics": {
                     "policy": "all non-destructive tools enabled by default; scope-gated",
                     "capabilities": {
@@ -189,6 +197,12 @@ def _ctx(request: Request) -> tuple[Database, Settings, Any]:
                     "scope": {
                         "cidrs": ["192.168.1.0/24"],
                         "authorized_targets": [],
+                    },
+                    "auto_discovery": {
+                        "enabled": True,
+                        "eligible_networks": [
+                            {"cidr": "10.20.0.0/24", "reporting_agents": 2}
+                        ],
                     },
                     "budget": {
                         "max_tool_calls": 10,

@@ -42,6 +42,25 @@ def build_health(
         "ping": binary_available("ping") or binary_available("/usr/bin/ping"),
     }
 
+    # Endpoint agents + discovery policy (read-only, never crashes health).
+    agents_summary: dict[str, Any] = {"active": 0, "stale": 0, "revoked": 0, "total": 0}
+    auto_networks: list[dict[str, Any]] = []
+    try:
+        from netagent.services.agents import agent_public_view
+        from netagent.services.discovery import auto_discovery_eligible_networks
+
+        agents = [agent_public_view(a, settings) for a in db.list_agents(limit=1000)]
+        agents_summary["total"] = len(agents)
+        for a in agents:
+            agents_summary[a["status"]] = agents_summary.get(a["status"], 0) + 1
+        if settings.auto_discovery_enabled:
+            auto_networks = [
+                {"cidr": e["cidr"], "reporting_agents": len(e["reporting_agents"])}
+                for e in auto_discovery_eligible_networks(db, settings)
+            ]
+    except Exception:  # health must never fail because of a new subsystem
+        pass
+
     components = {
         "database": {"ok": True, "path": str(settings.database_path), "stats": db.stats()},
         "suricata": {**suricata, "ok": suricata_ok},
@@ -52,11 +71,20 @@ def build_health(
             "model": settings.msty_model,
         },
         "monitor_thread": {"ok": True, "running": monitor_running},
+        "endpoint_agents": {
+            "ok": True,
+            **agents_summary,
+            "heartbeat_timeout_seconds": settings.agent_heartbeat_timeout_seconds,
+        },
         "diagnostics": {
             "policy": "all non-destructive tools enabled by default; scope-gated",
             "capabilities": capabilities,
             "scope": settings.scope_description(),
             "nmap_os_privileged": False,  # detected at call time; see /api/tools
+            "auto_discovery": {
+                "enabled": settings.auto_discovery_enabled,
+                "eligible_networks": auto_networks,
+            },
             "budget": {
                 "max_tool_calls": settings.max_tool_calls_per_investigation,
                 "deadline_seconds": settings.investigation_deadline_seconds,

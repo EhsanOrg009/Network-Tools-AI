@@ -398,7 +398,14 @@ class AdminScriptCreate(BaseModel):
 
 
 class ConsoleSessionCreate(BaseModel):
-    agent_id: str = Field(description="عامل هدف نشست ترمینال.")
+    agent_id: str | None = Field(
+        default=None,
+        description=(
+            "عامل هدف نشست ترمینال (داخل مسیر هم می‌آید؛ در صورت ارسال باید با "
+            "مسیر یکسان باشد)."
+        ),
+        examples=["agt_xxxxxxxxxxxx"],
+    )
     ttl_seconds: int | None = Field(
         default=None, ge=60, le=4 * 3600, description="عمر نشست؛ پیش‌فرض پیکربندی سرور."
     )

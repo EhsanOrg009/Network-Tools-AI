@@ -199,6 +199,7 @@ def heartbeat(
         agent_version=body.agent_version,
         hostname=body.hostname,
         platform=body.platform.os_family if body.platform else None,
+        capabilities=body.capabilities,
     )
     if not ok:
         raise HTTPException(status_code=403, detail="agent credential is revoked")
@@ -306,6 +307,7 @@ def agent_status(
         agent_version=body.agent_version,
         hostname=body.hostname,
         platform=body.platform.os_family if body.platform else None,
+        capabilities=body.capabilities,
     )
     if not ok:
         raise HTTPException(status_code=403, detail="agent credential is revoked")

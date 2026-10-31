@@ -965,12 +965,13 @@ class EndpointAgent:
         if args.server_url:
             self.state.data["server_url"] = self.server_url
         self.signing_key = os.environ.get("NETAGENT_TASK_SIGNING_KEY", "")
-        self.heartbeat_interval = max(5, int(args.heartbeat_interval))
-        self.inventory_interval = max(30, int(args.inventory_interval))
-        self.poll_interval = max(1.0, float(args.poll_interval))
-        self.allow_admin_exec = bool(args.allow_admin_exec)
-        self.allow_admin_console = bool(args.allow_admin_console)
-        self.allow_insecure_http = bool(args.allow_insecure_http)
+        # enroll/status subparsers don't carry the run-only flags; default them.
+        self.heartbeat_interval = max(5, int(getattr(args, "heartbeat_interval", 30) or 30))
+        self.inventory_interval = max(30, int(getattr(args, "inventory_interval", 300) or 300))
+        self.poll_interval = max(1.0, float(getattr(args, "poll_interval", 5.0) or 5.0))
+        self.allow_admin_exec = bool(getattr(args, "allow_admin_exec", False))
+        self.allow_admin_console = bool(getattr(args, "allow_admin_console", False))
+        self.allow_insecure_http = bool(getattr(args, "allow_insecure_http", False))
         self.console = ConsoleManager(max_sessions=3)
         self.client: ApiClient | None = None
         self.last_heartbeat = 0.0
@@ -1219,6 +1220,8 @@ def build_parser() -> argparse.ArgumentParser:
     enroll.add_argument("--enrollment-token", required=True)
     enroll.add_argument("--server-url", default=None)
     enroll.add_argument("--state-file", default=None)
+    enroll.add_argument("--allow-insecure-http", action="store_true",
+                        help="فقط تست محلی: اجازه‌ی http بدون رمزنگاری")
 
     run = sub.add_parser("run", help="اجرای دوره‌ای: ضربان + inventory + تسک‌ها")
     run.add_argument("--server-url", default=None)

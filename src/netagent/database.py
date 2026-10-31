@@ -1007,6 +1007,7 @@ class Database:
         agent_version: str | None = None,
         hostname: str | None = None,
         platform: str | None = None,
+        capabilities: list[str] | None = None,
     ) -> bool:
         now = _now_iso()
         now_epoch = datetime.now(timezone.utc).timestamp()
@@ -1021,13 +1022,17 @@ class Database:
                     heartbeat_interval = COALESCE(?, heartbeat_interval),
                     agent_version = COALESCE(?, agent_version),
                     hostname = COALESCE(?, hostname),
-                    platform = COALESCE(?, platform)
+                    platform = COALESCE(?, platform),
+                    capabilities_json = COALESCE(?, capabilities_json)
                 WHERE id = ? AND status != 'revoked'
                 """,
                 (
                     now, now_epoch,
                     json.dumps(claimed_ips, ensure_ascii=False) if claimed_ips is not None else None,
-                    heartbeat_interval, agent_version, hostname, platform, agent_id,
+                    heartbeat_interval, agent_version, hostname, platform,
+                    json.dumps([c for c in capabilities if isinstance(c, str)][:20],
+                               ensure_ascii=False) if capabilities is not None else None,
+                    agent_id,
                 ),
             )
             self._conn.commit()

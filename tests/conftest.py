@@ -128,3 +128,82 @@ def client(settings, db, monkeypatch):
     app.state.db = db
     with TestClient(app) as c:
         yield c
+
+
+# --- agent/admin/console test scaffolding (v3) -------------------------------
+
+ADMIN_TOKEN = "unit-admin-token-0123456789abcdef"
+SIGNING_KEY = "unit-task-signing-secret"
+
+
+@pytest.fixture()
+def secure_settings(settings: Settings) -> Settings:
+    """Settings with the admin control plane + console enabled for tests."""
+    settings.admin_api_token = ADMIN_TOKEN
+    settings.task_signing_key = SIGNING_KEY
+    settings.allow_admin_python_exec = True
+    settings.allow_admin_python_console = True
+    settings.agent_enrollment_token = ""
+    return settings
+
+
+def agent_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def make_client(database: Database, app_settings: Settings):
+    from fastapi.testclient import TestClient
+
+    from netagent.main import create_app
+
+    app_settings.enable_monitor = False
+    app = create_app(app_settings, start_monitor=False)
+    app.state.db = database
+    return TestClient(app)
+
+
+def admin_headers(actor: str | None = None) -> dict:
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    if actor:
+        h["X-Admin-Actor"] = actor
+    return h
+
+
+@pytest.fixture()
+def full_client(secure_settings, db) -> "TestClient":  # type: ignore[name-defined]
+    c = make_client(db, secure_settings)
+    yield c
+    c.close()
+
+
+def enroll(client, *, capabilities=("inventory",), token: str | None = None,
+           hostname: str = "ws-test") -> tuple[str, str]:
+    """Enroll via the agent API; returns (agent_id, agent_token).
+
+    Without an explicit ``token`` a real one-time enrollment token is minted
+    through the admin API, exercising the full admin→agent identity chain."""
+    if token is None:
+        r = client.post("/api/admin/v1/enrollment-tokens",
+                        json={"ttl_minutes": 5},
+                        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+        assert r.status_code == 200, r.text
+        token = r.json()["token"]
+    r = client.post("/api/agent/v1/enroll", json={
+        "enrollment_token": token,
+        "hostname": hostname,
+        "platform": {"os_family": "Linux", "os_name": "Ubuntu", "os_version": "1",
+                     "kernel": "#1", "arch": "x86_64"},
+        "agent_version": "1.0.0",
+        "capabilities": list(capabilities),
+        "claimed_ips": ["192.168.1.10"],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["agent_id"], body["agent_token"]
+
+
+def claim_over_http(client, a_token: str, cap="inventory"):
+    """Poll via the real HTTP endpoint (capabilities come from the agent row)."""
+    r = client.get("/api/agent/v1/tasks/next", headers=agent_headers(a_token))
+    assert r.status_code == 200, r.text
+    return r.json().get("task")

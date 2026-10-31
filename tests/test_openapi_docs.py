@@ -8,6 +8,7 @@ OpenAPI schema and the test client.
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -339,3 +340,53 @@ def test_ping_tool_example_uses_documented_host_parameter(openapi):
     op = _operations(openapi)[("POST", "/api/tools/{tool_name}")]
     named = op["requestBody"]["content"]["application/json"]["examples"]
     assert "ping" in named and "host" in named["ping"]["value"]
+
+
+# -- RTL Swagger UI (custom /api/docs shell) ---------------------------------------
+
+
+def test_api_docs_is_rtl_with_ltr_technical_islands(client):
+    """The custom RTL shell loads: dir=rtl page, LTR selectors for code/JSON,
+    and the real SwaggerUIBundle (Try it out intact)."""
+    r = client.get("/api/docs")
+    assert r.status_code == 200
+    html = r.text
+    assert 'dir="rtl"' in html and 'lang="fa"' in html
+    assert "direction: rtl" in html
+    assert "SwaggerUIBundle" in html  # real bundle → Try it out still works
+    assert "openapi.json" in html      # real generated spec, not a duplicate
+    # technical islands stay LTR
+    for selector in ("pre", "code", ".microlight", ".opblock-summary-path",
+                     "input", "textarea"):
+        assert selector in html
+    assert 'setAttribute("dir", "ltr")' in html  # dynamic DOM fix
+
+
+# -- authentication requirements are documented -------------------------------------
+
+
+def test_agent_and_admin_routes_require_bearer_in_docs(openapi):
+    """Every agent/admin operation documents 401; admin-only families exist
+    under their own prefixes (separate credential domains)."""
+    ops = _operations(openapi)
+    for (method, path), op in ops.items():
+        if path.startswith("/api/agent/v1") and not path.endswith("/enroll"):
+            assert "401" in op["responses"], f"{method} {path}: 401 undocumented"
+        if path.startswith("/api/admin/v1"):
+            assert "401" in op["responses"], f"{method} {path}: 401 undocumented"
+
+
+def test_console_tag_documents_admin_only_policy(openapi):
+    """Console operations carry the dedicated Persian tag and mark the
+    administrator-only policy in their descriptions."""
+    ops = _operations(openapi)
+    console_ops = [op for (m, p), op in ops.items() if "console" in p]
+    assert console_ops
+    for op in console_ops:
+        assert "ترمینال پایتون از راه دور" in op["tags"]
+    # the family-level policy lives in the tag description (single source)
+    tag = next(t for t in openapi["tags"] if t["name"] == "ترمینال پایتون از راه دور")
+    assert "مدیر" in tag["description"] and "ALLOW_ADMIN_PYTHON_CONSOLE" in tag["description"]
+    create = next(op for (m, p), op in ops.items()
+                  if p.endswith("/console/sessions") and m == "POST")
+    assert "مدیر" in create["summary"] + create["description"]

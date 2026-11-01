@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from netagent import collectors
+from netagent.collectors import connectivity, system_info
 from netagent.config import Settings, binary_available
 from netagent.database import Database
 
@@ -236,14 +236,14 @@ def _run_endpoint_status(db: Database, settings: Settings, args: dict[str, Any])
 
 def _run_ping(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     v = _validate_ping_args(args)
-    result = collectors.connectivity.ping(settings, v["host"])
+    result = connectivity.ping(settings, v["host"])
     db.record_observation(v["host"], "ping", bool(result.get("ok")), result)
     return result
 
 
 def _run_tcp(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     v = _validate_tcp_args(args, settings)
-    result = collectors.connectivity.tcp_check(settings, v["host"], v["port"])
+    result = connectivity.tcp_check(settings, v["host"], v["port"])
     db.record_observation(
         v["host"], "tcp", bool(result.get("ok")),
         {"target": v["host"], "port": v["port"], "ok": result.get("ok"),
@@ -404,7 +404,7 @@ def _run_arp_info(db: Database, settings: Settings, args: dict[str, Any]) -> dic
     ip = args.get("ip") or args.get("host") or args.get("target")
     if not ip:
         raise ValueError("ip is required")
-    result = collectors.system_info.arp_info(str(ip)[:64])
+    result = system_info.arp_info(str(ip)[:64])
     if result.get("mac"):
         db.record_observation(str(ip)[:64], "arp_info", True,
                               {"mac": result["mac"], "state": result.get("state")})
@@ -412,14 +412,14 @@ def _run_arp_info(db: Database, settings: Settings, args: dict[str, Any]) -> dic
 
 
 def _run_route_info(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
-    return collectors.system_info.route_info()
+    return system_info.route_info()
 
 
 def _run_reverse_dns(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     ip = args.get("ip") or args.get("host")
     if not ip:
         raise ValueError("ip is required")
-    return collectors.system_info.reverse_dns(str(ip)[:64])
+    return system_info.reverse_dns(str(ip)[:64])
 
 
 def _run_fingerprint(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:

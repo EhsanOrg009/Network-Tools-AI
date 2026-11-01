@@ -148,7 +148,7 @@ def test_ping_arguments_validation(settings, db, monkeypatch):
 
     import netagent.agent.tools as tools_mod
 
-    monkeypatch.setattr(tools_mod.collectors.connectivity, "ping", fake_ping)
+    monkeypatch.setattr(tools_mod.connectivity, "ping", fake_ping)
     registry = build_registry(settings)
     result = execute_tool(registry, db, settings, "ping", {"host": "192.168.1.10"})
     assert result["ok"] is True

@@ -615,6 +615,56 @@ def get_agent(
     return out
 
 
+@router.get(
+    "/agents/{agent_id}/traffic",
+    tags=["مدیریت مدیر شبکه"],
+    summary="نمودار و جریان‌های ترافیک یک عامل",
+    description=(
+        "سری زمانی شمارنده‌ها با نرخ upload/download (محاسبه‌شده روی سرور از دو "
+        "نمونه‌ی متوالی)، آخرین اتصال‌های فعال و زمان آخرین جمع‌آوری. منبع داده "
+        "فقط گزارش خود عامل است — متادیتای همان سیستم، بدون payload. اگر عامل "
+        "قابلیت traffic را فعال نکرده باشد، خالی برمی‌گردد (Empty State)."
+    ),
+    responses=_responses(
+        "سری زمانی + آخرین وضعیت.",
+        {
+            "samples": [
+                {"ts": "2026-11-01T10:00:00+00:00", "interface": "eth0",
+                 "rx_rate": 12400.5, "tx_rate": 3100.2, "rx_bytes": 1823456789,
+                 "tx_bytes": 234567890, "active_connections": 31},
+            ],
+            "latest": {"ts": "2026-11-01T10:00:00+00:00",
+                       "connections": [{"local": "192.168.1.51:52311",
+                                        "remote": "142.250.185.68:443", "state": "ESTAB"}]},
+            "hours": 24,
+        },
+        not_found="عاملی با این شناسه وجود ندارد.",
+    ),
+)
+def get_agent_traffic(
+    request: Request,
+    agent_id: str = Path(description="شناسه‌ی عامل.", examples=["agt_9f2c41ba07c3"]),
+    hours: float = Query(24, ge=0.25, le=168, description="بازه‌ی زمانی به ساعت."),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(default=None),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    agent = db.get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    samples = db.list_traffic_samples(agent_id, hours=hours)
+    latest = db.latest_traffic_sample(agent_id)
+    return {"samples": samples, "latest": latest, "hours": hours}
+
+
 @router.post(
     "/agents/{agent_id}/revoke",
     tags=["مدیریت مدیر شبکه"],

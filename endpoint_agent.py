@@ -585,6 +585,86 @@ def collect_optional_stats() -> dict:
     return stats
 
 
+# ---------------------------------------------------------------------------
+# Traffic monitoring: host-local metadata only (no payload capture)
+# ---------------------------------------------------------------------------
+
+
+def collect_traffic() -> dict:
+    """Per-interface byte counters + active TCP connections of THIS host.
+
+    Privacy: metadata only — no packet contents, no process names, no
+    per-process attribution. What the OS exposes unprivileged is what gets
+    reported; anything unavailable is reported as unavailable, never faked.
+    """
+    errors: list[str] = []
+    interfaces: list[dict] = []
+    connections: list[dict] = []
+
+    if IS_WINDOWS:
+        ps = ("Get-NetAdapterStatistics | Select-Object -First 20 "
+              "@{n='i';e={$_.Name}},@{n='r';e={[uint64]$_.ReceivedBytes}},"
+              "@{n='t';e={[uint64]$_.SentBytes}} | ConvertTo-Json -Compress")
+        rc, out, err = _run_cmd(["powershell", "-NoProfile", "-NonInteractive",
+                                 "-ExecutionPolicy", "Bypass", "-Command", ps], timeout=30)
+        if rc == 0 and out.strip():
+            try:
+                data = json.loads(out)
+                data = data if isinstance(data, list) else [data]
+                interfaces = [{"interface": d["i"], "rx_bytes": int(d["r"]),
+                               "tx_bytes": int(d["t"])} for d in data]
+            except (ValueError, KeyError, TypeError) as exc:
+                errors.append(f"adapter statistics parse: {exc}")
+        else:
+            errors.append(err or "Get-NetAdapterStatistics unavailable")
+        ps2 = ("Get-NetTCPConnection -State Established | Select-Object -First 50 "
+               "@{n='l';e={$_.LocalAddress+':'+$_.LocalPort}},"
+               "@{n='r';e={$_.RemoteAddress+':'+$_.RemotePort}},"
+               "@{n='s';e={$_.State}} | ConvertTo-Json -Compress")
+        rc, out, err = _run_cmd(["powershell", "-NoProfile", "-NonInteractive",
+                                 "-ExecutionPolicy", "Bypass", "-Command", ps2], timeout=30)
+        if rc == 0 and out.strip():
+            try:
+                data = json.loads(out)
+                data = data if isinstance(data, list) else [data]
+                connections = [{"local": d["l"], "remote": d["r"],
+                                "state": d["s"]} for d in data][:50]
+            except (ValueError, KeyError, TypeError) as exc:
+                errors.append(f"tcp connections parse: {exc}")
+    else:
+        try:
+            with open("/proc/net/dev", encoding="utf-8") as fh:
+                for line in fh.readlines()[2:22]:
+                    if ":" not in line:
+                        continue
+                    iface, rest = line.split(":", 1)
+                    fields = rest.split()
+                    if len(fields) < 9:
+                        continue
+                    interfaces.append({
+                        "interface": iface.strip()[:64],
+                        "rx_bytes": int(fields[0]),
+                        "tx_bytes": int(fields[8]),
+                    })
+        except (OSError, ValueError, IndexError) as exc:
+            errors.append(f"/proc/net/dev: {exc.__class__.__name__}")
+        rc, out, err = _run_cmd(["ss", "-tn"], timeout=10)
+        if rc == 0:
+            for line in out.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 5 and parts[0] in ("ESTAB", "SYN-SENT", "CLOSE-WAIT",
+                                                    "TIME-WAIT", "LISTEN"):
+                    connections.append({"local": parts[3], "remote": parts[4],
+                                        "state": parts[0]})
+                if len(connections) >= 50:
+                    break
+        else:
+            errors.append(err or "ss unavailable")
+
+    return {"interfaces": interfaces[:20], "connections": connections,
+            "errors": errors}
+
+
 def collect_inventory(collectors_status: list | None = None) -> dict:
     status: list[dict] = collectors_status or []
     errors: list[str] = []
@@ -974,6 +1054,7 @@ class EndpointAgent:
         self.allow_admin_exec = bool(getattr(args, "allow_admin_exec", False))
         self.allow_admin_console = bool(getattr(args, "allow_admin_console", False))
         self.allow_insecure_http = bool(getattr(args, "allow_insecure_http", False))
+        self.enable_traffic = bool(getattr(args, "enable_traffic", False))
         self.console = ConsoleManager(max_sessions=3)
         self.client: ApiClient | None = None
         self.last_heartbeat = 0.0
@@ -988,6 +1069,8 @@ class EndpointAgent:
             caps.append("admin_exec")
         if self.allow_admin_console:
             caps.append("console")
+        if self.enable_traffic:
+            caps.append("traffic")
         return caps
 
     # -- http ------------------------------------------------------------------
@@ -1160,6 +1243,24 @@ class EndpointAgent:
         self.api().request("POST", "/api/agent/v1/inventory", payload=payload)
         self.last_inventory = time.time()
 
+    def push_traffic(self) -> None:
+        """Host-local traffic metadata; silently skipped when disabled."""
+        if not self.enable_traffic:
+            return
+        try:
+            sample = collect_traffic()
+            if sample.get("interfaces") or sample.get("connections"):
+                self.api().request("POST", "/api/agent/v1/traffic", payload={
+                    "collected_at_epoch": round(time.time(), 3),
+                    "interfaces": sample["interfaces"],
+                    "connections": sample["connections"],
+                })
+        except ApiError as exc:
+            if exc.status != 409:
+                print(f"traffic push failed: {exc}", file=sys.stderr)
+        except Exception as exc:  # traffic must never break the loop
+            print(f"traffic collector error: {exc}", file=sys.stderr)
+
     def poll_and_execute_task(self) -> None:
         response = self.api().request("GET", "/api/agent/v1/tasks/next")
         message = response.get("task")
@@ -1308,6 +1409,8 @@ class EndpointAgent:
                         if hb.get("inventory_due") or \
                                 time.time() - self.last_inventory >= self.inventory_interval:
                             self.push_inventory()
+                        if self.enable_traffic:
+                            self.push_traffic()
                     self.poll_and_execute_task()
                 attempt = 0
             except ApiError as exc:
@@ -1360,6 +1463,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="اجازه‌ی ترمینال پایتون تعاملی مدیریتی (پیش‌فرض: خاموش)")
     run.add_argument("--allow-insecure-http", action="store_true",
                      help="فقط تست محلی: اجازه‌ی http بدون رمزنگاری")
+    run.add_argument("--enable-traffic", action="store_true",
+                     help="ارسال دوره‌ای متادیتای ترافیک همین سیستم (شمارنده‌ها + اتصال‌های فعال؛ بدون payload)")
 
     for name, help_text in (
         ("status", "نمایش وضعیت محلی (بدون افشای توکن)"),

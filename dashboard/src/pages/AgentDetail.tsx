@@ -13,6 +13,7 @@ import { Card, EmptyState, ErrorState, SkeletonRows, StatusPill, TechChip, Confi
 import { IconAgents, IconHeartbeat } from "../components/icons";
 import { useToast } from "../components/toast";
 import RemoteConsole from "../components/RemoteConsole";
+import TrafficMonitor from "../components/TrafficMonitor";
 
 const TASK_TYPE_FA: Record<string, string> = {
   inventory_collection: "فهرست‌برداری سیستم و شبکه",
@@ -38,7 +39,7 @@ export default function AgentDetailPage() {
   const [tasks, setTasks] = useState<TaskRow[] | null>(null);
   const [audit, setAudit] = useState<AuditRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"system" | "network" | "activity" | "diagnostics" | "console" | "manage">("system");
+  const [tab, setTab] = useState<"system" | "network" | "activity" | "diagnostics" | "console" | "traffic" | "manage">("system");
   const [refreshKey, setRefresh] = useState(0);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [busyTask, setBusyTask] = useState<string | null>(null);
@@ -144,7 +145,7 @@ export default function AgentDetailPage() {
       <div className="tabs">
         {([
           ["system", "سیستم"], ["network", "شبکه"], ["activity", "فعالیت‌ها"],
-          ["diagnostics", "عیب‌یابی"], ["console", "کنسول پایتون"], ["manage", "مدیریت"],
+          ["diagnostics", "عیب‌یابی"], ["traffic", "ترافیک"], ["console", "کنسول پایتون"], ["manage", "مدیریت"],
         ] as const).map(([k, label]) => (
           <button key={k} className={`tab${tab === k ? " active" : ""}`} onClick={() => setTab(k)}>
             {label}
@@ -320,6 +321,8 @@ export default function AgentDetailPage() {
           </Card>
         </div>
       )}
+
+      {tab === "traffic" && <TrafficMonitor agentId={agentId} />}
 
       {tab === "console" && (
         <RemoteConsole agentId={a.id} agentLabel={a.hostname ?? ""} />

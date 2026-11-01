@@ -152,6 +152,14 @@ class Settings(BaseSettings):
     ai_analysis_backlog_limit: int = Field(default=200, ge=10, le=5000)
 
     # ------------------------------------------------------------------
+    # Endpoint traffic monitoring (v6) — host-local metadata only
+    # ------------------------------------------------------------------
+    traffic_monitoring_enabled: bool = True
+    # Samples kept per agent (default ≈ 24h at a 2.5-minute cadence).
+    traffic_retention_samples_per_agent: int = Field(default=576, ge=50, le=10000)
+    traffic_max_connections_per_sample: int = Field(default=50, ge=0, le=200)
+
+    # ------------------------------------------------------------------
     # Administrator control plane (v3) — disabled unless explicitly configured
     # ------------------------------------------------------------------
     # ADMIN_API_TOKEN (plaintext, >=16 chars) or ADMIN_API_TOKEN_SHA256.

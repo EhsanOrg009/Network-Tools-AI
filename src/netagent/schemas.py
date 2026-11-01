@@ -476,6 +476,57 @@ class ClaimRequest(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Endpoint traffic monitoring (v6)
+# ---------------------------------------------------------------------------
+
+
+class TrafficInterfaceSample(BaseModel):
+    """شمارنده‌های یک رابط روی نقطه‌پایان (metadata؛ بدون payload)."""
+
+    model_config = {"extra": "ignore"}
+
+    interface: str = Field(max_length=64, description="نام رابط.")
+    rx_bytes: int = Field(ge=0, description="مجموع بایت دریافتی از بوت/شمارنده.")
+    tx_bytes: int = Field(ge=0, description="مجموع بایت ارسالی از بوت/شمارنده.")
+
+
+class TrafficConnection(BaseModel):
+    """یک اتصال فعال گزارش‌شده (بدون محتوای پیام‌ها)."""
+
+    model_config = {"extra": "ignore"}
+
+    local: str = Field(max_length=64, description="آدرس:پورت محلی.")
+    remote: str = Field(max_length=64, description="آدرس:پورت مقصد.")
+    state: str | None = Field(default=None, max_length=32)
+    interface: str | None = Field(default=None, max_length=64)
+
+
+class TrafficSampleRequest(BaseModel):
+    """گزارش دوره‌ای ترافیک همان سیستم (فقط خود میزبان — نه کل LAN)."""
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "collected_at_epoch": 1793594400.0,
+                    "interfaces": [{"interface": "eth0", "rx_bytes": 1823456789, "tx_bytes": 234567890}],
+                    "connections": [{"local": "192.168.1.51:52311", "remote": "142.250.185.68:443",
+                                     "state": "ESTAB", "interface": "eth0"}],
+                }
+            ]
+        }
+    }
+
+    collected_at_epoch: float | None = Field(default=None)
+    interfaces: list[TrafficInterfaceSample] = Field(
+        default_factory=list, description="حداکثر ۲۰ رابط؛ نمونه‌های بیشتر رد می‌شوند."
+    )
+    connections: list[TrafficConnection] = Field(
+        default_factory=list, description="اتصال‌های فعال (حداکثر ۵۰ مورد)."
+    )
+
+
 class EnrollmentRejectBody(BaseModel):
     reason: str | None = Field(default=None, max_length=500, description="دلیل رد (برای سابقه).")
 

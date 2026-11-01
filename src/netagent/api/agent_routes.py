@@ -28,6 +28,7 @@ from netagent.schemas import (
     RegistrationRequest,
     SimpleAck,
     TaskResultRequest,
+    TrafficSampleRequest,
 )
 from netagent.security import verify_admin_token  # noqa: F401 (re-exported for tests)
 from netagent.services import agents as agent_service
@@ -419,6 +420,53 @@ def inventory(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     summary["server_time_epoch"] = time.time()
     return summary
+
+
+@router.post(
+    "/traffic",
+    tags=["Endpoint Agent"],
+    summary="گزارش دوره‌ای متادیتای ترافیک همان سیستم",
+    description=(
+        "شمارنده‌های بایت هر رابط + فهرست اتصال‌های فعال (فقط متادیتا؛ بدون "
+        "payload). سرور نرخ upload/download را از اختلاف دو نمونه‌ی متوالی "
+        "می‌سازد؛ ریست شمارنده (بوت) نرخ ساختگی تولید نمی‌کند. این قابلیت فقط "
+        "ترافیک **سیستم خود عامل** را می‌بیند — مشاهده‌ی کل LAN به Port Mirroring "
+        "نیاز دارد و ادعای آن نادرست است. داده با نگه‌داری محدود ذخیره می‌شود."
+    ),
+    responses=_responses(
+        "تعداد نمونه‌های ذخیره‌شده.",
+        {"stored": 2, "server_time_epoch": 1793594400.5},
+        revoked=True,
+    ),
+)
+def traffic(
+    request: Request,
+    body: TrafficSampleRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    agent = _agent_or_error(request, authorization)
+    if not settings.traffic_monitoring_enabled:
+        return {"stored": 0, "detail": "traffic monitoring disabled on server",
+                "server_time_epoch": time.time()}
+    samples = [
+        {
+            "interface": iface.interface,
+            "rx_bytes": iface.rx_bytes,
+            "tx_bytes": iface.tx_bytes,
+            "connections": None,
+        }
+        for iface in body.interfaces[:20]
+    ]
+    # connections snapshot rides on the first interface sample (per-endpoint list)
+    conns = [c.model_dump() for c in body.connections[: settings.traffic_max_connections_per_sample]]
+    if samples and conns:
+        samples[0]["connections"] = conns
+    result = db.insert_traffic_samples(
+        agent["id"], samples, retention=settings.traffic_retention_samples_per_agent,
+    )
+    result["server_time_epoch"] = time.time()
+    return result
 
 
 @router.post(

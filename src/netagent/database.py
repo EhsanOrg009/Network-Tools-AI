@@ -310,6 +310,21 @@ CREATE TABLE IF NOT EXISTS alert_analyses (
     analyzed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alertanal_status ON alert_analyses(status, alert_id);
+
+CREATE TABLE IF NOT EXISTS agent_traffic_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    epoch REAL NOT NULL,
+    interface TEXT NOT NULL,
+    rx_bytes INTEGER NOT NULL,
+    tx_bytes INTEGER NOT NULL,
+    rx_rate REAL,
+    tx_rate REAL,
+    active_connections INTEGER,
+    connections_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_agent ON agent_traffic_samples(agent_id, epoch);
 """
 
 
@@ -2026,6 +2041,126 @@ class Database:
                 "SELECT COUNT(*) AS c FROM alert_analyses WHERE status IN ('PENDING', 'PROCESSING')"
             ).fetchone()
         return int(row["c"])
+
+    # =========================================================================
+    # Endpoint traffic monitoring (v6): per-interface counters + connections
+    # =========================================================================
+
+    def insert_traffic_samples(
+        self,
+        agent_id: str,
+        samples: list[dict[str, Any]],
+        *,
+        retention: int = 576,
+    ) -> dict[str, Any]:
+        """Store one sample per interface; compute rates from the previous
+        sample of the same (agent, interface). Counter resets (reboot/interface
+        recreate) produce a NULL rate instead of a bogus spike."""
+        now = _now_iso()
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        stored = 0
+        with self._lock:
+            for s in samples:
+                iface = str(s.get("interface") or "").strip()[:64]
+                if not iface:
+                    continue
+                rx = int(s.get("rx_bytes") or 0)
+                tx = int(s.get("tx_bytes") or 0)
+                prev = self._conn.execute(
+                    """
+                    SELECT epoch, rx_bytes, tx_bytes FROM agent_traffic_samples
+                    WHERE agent_id = ? AND interface = ?
+                    ORDER BY epoch DESC LIMIT 1
+                    """,
+                    (agent_id, iface),
+                ).fetchone()
+                rx_rate = tx_rate = None
+                if prev is not None:
+                    dt = now_epoch - float(prev["epoch"])
+                    if dt > 0.2 and rx >= prev["rx_bytes"] and tx >= prev["tx_bytes"]:
+                        rx_rate = round((rx - prev["rx_bytes"]) / dt, 1)
+                        tx_rate = round((tx - prev["tx_bytes"]) / dt, 1)
+                connections = s.get("connections")
+                self._conn.execute(
+                    """
+                    INSERT INTO agent_traffic_samples(
+                        agent_id, ts, epoch, interface, rx_bytes, tx_bytes,
+                        rx_rate, tx_rate, active_connections, connections_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        agent_id, now, now_epoch, iface, rx, tx, rx_rate, tx_rate,
+                        len(connections) if isinstance(connections, list) else None,
+                        json.dumps(connections, ensure_ascii=False, default=str)[: 64 * 1024]
+                        if isinstance(connections, list) else None,
+                    ),
+                )
+                stored += 1
+            self._conn.commit()
+        self._prune_traffic(agent_id, retention)
+        return {"stored": stored}
+
+    def _prune_traffic(self, agent_id: str, retention: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                DELETE FROM agent_traffic_samples WHERE agent_id = ? AND id NOT IN (
+                    SELECT id FROM agent_traffic_samples WHERE agent_id = ?
+                    ORDER BY epoch DESC LIMIT ?
+                )
+                """,
+                (agent_id, agent_id, max(10, int(retention))),
+            )
+            self._conn.commit()
+
+    def list_traffic_samples(
+        self, agent_id: str, *, hours: float = 24, limit: int = 600
+    ) -> list[dict[str, Any]]:
+        since = datetime.now(timezone.utc).timestamp() - max(0.25, float(hours)) * 3600
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, ts, epoch, interface, rx_bytes, tx_bytes, rx_rate, tx_rate,
+                       active_connections, connections_json
+                FROM agent_traffic_samples
+                WHERE agent_id = ? AND epoch >= ?
+                ORDER BY epoch ASC LIMIT ?
+                """,
+                (agent_id, since, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("connections_json"):
+                try:
+                    d["connections"] = json.loads(d.pop("connections_json"))
+                except (TypeError, ValueError):
+                    d.pop("connections_json", None)
+            else:
+                d.pop("connections_json", None)
+            out.append(d)
+        return out
+
+    def latest_traffic_sample(self, agent_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT ts, epoch, interface, rx_bytes, tx_bytes, rx_rate, tx_rate,
+                       active_connections, connections_json
+                FROM agent_traffic_samples WHERE agent_id = ?
+                ORDER BY epoch DESC LIMIT 1
+                """,
+                (agent_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        if d.get("connections_json"):
+            try:
+                d["connections"] = json.loads(d.pop("connections_json"))
+            except (TypeError, ValueError):
+                d.pop("connections_json", None)
+        return d
 
     def list_audit(
         self, *, action: str | None = None, limit: int = 100, offset: int = 0

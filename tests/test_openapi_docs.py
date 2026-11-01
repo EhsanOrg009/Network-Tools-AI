@@ -63,6 +63,7 @@ EXPECTED_ENDPOINTS = {
     ("POST", "/api/admin/v1/enrollment-requests/{request_id}/reject"),
     ("GET", "/api/dashboard/v1/overview"),
     ("GET", "/api/dashboard/v1/healthz"),
+    ("GET", "/api/dashboard/v1/settings"),
     ("POST", "/api/admin/v1/tasks"),
     ("GET", "/api/admin/v1/tasks"),
     ("GET", "/api/admin/v1/tasks/{task_id}"),

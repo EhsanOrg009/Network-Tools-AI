@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from netagent import __version__
 from netagent.agent.llm_client import LLMClient
@@ -154,12 +155,14 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
 
     class _SPAFallback(StaticFiles):
         async def get_response(self, path: str, scope):  # type: ignore[override]
-            response = await super().get_response(path, scope)
-            if response.status_code == 404 and "." not in path.split("/")[-1]:
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
                 # SPA route → serve the app shell; missing asset files (which
                 # have an extension) still 404 loudly
-                return await super().get_response("index.html", scope)
-            return response
+                if exc.status_code == 404 and "." not in path.split("/")[-1]:
+                    return await super().get_response("index.html", scope)
+                raise
 
     if dist.is_dir():
         app.mount("/dashboard", _SPAFallback(directory=dist, html=True), name="dashboard")

@@ -64,3 +64,22 @@ def test_swagger_and_dashboard_are_separate_surfaces(full_client):
     # dashboard SPA only mounts when the build exists; API routes stay collide-free
     r2 = full_client.get("/api/dashboard/v1/overview")
     assert r2.status_code == 401  # API auth is intact regardless of the mount
+
+
+def test_dashboard_spa_serving(full_client):
+    """When the Vite build exists, /dashboard serves the shell, deep SPA
+    routes fall back to index.html, and missing assets still 404."""
+    from pathlib import Path
+
+    dist = Path(__file__).resolve().parents[1] / "dashboard" / "dist"
+    r = full_client.get("/dashboard/agents/whatever")
+    if dist.is_dir():
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert b'id="root"' in r.content
+        assert full_client.get("/dashboard/assets/missing-file.js").status_code == 404
+    else:
+        assert r.status_code in (404, 200)  # mount absent in dev machines without build
+    # swagger untouched either way
+    docs = full_client.get("/api/docs")
+    assert docs.status_code == 200 and "swagger" in docs.text.lower()

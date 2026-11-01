@@ -20,3 +20,7 @@ data/
 
 # OS
 .DS_Store
+
+# Dashboard build
+node_modules/
+dashboard/dist/

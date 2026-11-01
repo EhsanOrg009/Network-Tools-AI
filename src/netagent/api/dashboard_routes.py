@@ -170,3 +170,60 @@ def healthz(
 ) -> dict[str, Any]:
     _guard(request, authorization, x_admin_actor)
     return {"ok": True, "now": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}
+
+
+# Non-secret, non-credential fields exposed for the dashboard Settings page.
+# Tokens, keys, hashes and paths that could contain secrets are NEVER listed.
+_SETTINGS_WHITELIST = (
+    "app_host", "app_port",
+    "monitor_cidrs", "authorized_targets", "monitor_interface",
+    "enable_monitor", "monitor_interval_seconds",
+    "suricata_eve_path",
+    "llm_enabled", "msty_base_url", "msty_model",
+    "allow_auto_registration", "enrollment_request_ttl_minutes",
+    "max_pending_enrollment_requests", "registration_rate_limit_per_hour",
+    "agent_heartbeat_interval_seconds", "agent_heartbeat_timeout_seconds",
+    "agent_inventory_interval_seconds", "agent_max_task_result_bytes",
+    "allow_admin_python_exec", "allow_admin_python_console",
+    "admin_script_max_bytes", "admin_script_max_runtime_seconds",
+    "console_session_ttl_seconds", "console_idle_timeout_seconds",
+    "console_command_timeout_seconds", "console_max_code_bytes",
+    "console_max_output_bytes", "console_max_pending_commands",
+    "auto_discovery_enabled", "discovery_excluded_cidrs",
+    "discovery_excluded_interfaces", "auto_discovery_max_addresses",
+    "auto_discovery_min_reporters",
+    "ping_count", "ping_timeout_seconds", "allowed_tcp_ports",
+)
+
+
+@router.get(
+    "/settings",
+    summary="نمای فقط‌خواندنی تنظیمات غیر‌فاش (برای صفحه‌ی تنظیمات داشبورد)",
+    description=(
+        "فقط فیلدهای غیر‌حساس پیکربندی را برمی‌گرداند؛ توکن‌ها، کلیدها و مقادیر "
+        "فاش هرگز در این پاسخ نمی‌آیند. تغییر پیکربندی از این مسیر هم انجام "
+        "نمی‌شود — منبع حقیقت متغیرهای محیطی هسته است."
+    ),
+    responses=_responses(
+        "پیکربندی غیر‌حساس سامانه.",
+        {"app_host": "127.0.0.1", "app_port": 8000,
+         "allow_auto_registration": True, "registration_rate_limit_per_hour": 30},
+    ),
+)
+def dashboard_settings(
+    request: Request,
+    authorization: str | None = Header(
+        default=None,
+        description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`.",
+    ),
+    x_admin_actor: str | None = Header(default=None, description="برچسب مدیر."),
+) -> dict[str, Any]:
+    _guard(request, authorization, x_admin_actor)
+    _, settings = _ctx(request)
+    out: dict[str, Any] = {}
+    for key in _SETTINGS_WHITELIST:
+        value = getattr(settings, key, None)
+        if value is None:
+            continue
+        out[key] = str(value) if not isinstance(value, (str, int, float, bool)) else value
+    return out

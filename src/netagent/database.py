@@ -937,6 +937,70 @@ class Database:
             "pending_tasks": int(tasks),
         }
 
+    # -- dashboard aggregates (read-only) ------------------------------------
+
+    def alert_severity_counts(self, since_epoch: float | None = None) -> list[dict[str, Any]]:
+        """Alerts grouped by Suricata severity (1=fundamental … 4=low)."""
+        cond, params = "", []
+        if since_epoch is not None:
+            cond = "WHERE ts_epoch >= ?"
+            params = [since_epoch]
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT severity, COUNT(*) AS c FROM alerts {cond}
+                GROUP BY severity ORDER BY severity
+                """,
+                params,
+            ).fetchall()
+        return [{"severity": int(r["severity"]), "count": int(r["c"])} for r in rows]
+
+    def daily_activity_counts(self, days: int = 7) -> list[dict[str, Any]]:
+        """Per-day counts of raw events, alerts and audit actions for the
+        last ``days`` days (UTC) — the raw material for dashboard trends."""
+        with self._lock:
+            epoch_now = datetime.now(timezone.utc).timestamp()
+            day_start = int(epoch_now // 86400) * 86400 - (days - 1) * 86400
+            merged: dict[str, dict[str, int]] = {}
+            for table, column in (("events", "ev"), ("alerts", "al")):
+                rows = self._conn.execute(
+                    f"""
+                    SELECT CAST((ts_epoch / 86400.0) AS INTEGER) * 86400 AS day_epoch,
+                           COUNT(*) AS c
+                    FROM {table} WHERE ts_epoch >= ?
+                    GROUP BY day_epoch
+                    """,
+                    (day_start,),
+                ).fetchall()
+                for r in rows:
+                    bucket = merged.setdefault(
+                        datetime.fromtimestamp(r["day_epoch"], timezone.utc)
+                        .date().isoformat(), {"events": 0, "alerts": 0, "audit": 0},
+                    )
+                    bucket[column] = int(r["c"])
+            rows = self._conn.execute(
+                """
+                SELECT CAST((at_epoch / 86400.0) AS INTEGER) * 86400 AS day_epoch,
+                       COUNT(*) AS c FROM (
+                    SELECT CAST(strftime('%s', at) AS INTEGER) AS at_epoch
+                    FROM admin_audit WHERE at IS NOT NULL AND at != ''
+                ) WHERE at_epoch >= ?
+                GROUP BY day_epoch
+                """,
+                (day_start,),
+            ).fetchall()
+            for r in rows:
+                bucket = merged.setdefault(
+                    datetime.fromtimestamp(r["day_epoch"], timezone.utc)
+                    .date().isoformat(), {"events": 0, "alerts": 0, "audit": 0},
+                )
+                bucket["audit"] = int(r["c"])
+        out = []
+        for i in range(days):
+            day = datetime.fromtimestamp(day_start + i * 86400, timezone.utc).date().isoformat()
+            out.append({"date": day, **merged.get(day, {"events": 0, "alerts": 0, "audit": 0})})
+        return out
+
     # =========================================================================
     # Endpoint agents (v3): identity, heartbeat, inventory
     # =========================================================================

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from netagent import __version__
 from netagent.agent.llm_client import LLMClient
 from netagent.api.agent_routes import router as agent_router
 from netagent.api.admin_routes import router as admin_router
+from netagent.api.dashboard_routes import router as dashboard_router
 from netagent.api.docs_ui import rtl_swagger_ui_html
 from netagent.api.routes import router
 from netagent.config import Settings, load_settings
@@ -57,6 +60,14 @@ OPENAPI_TAGS = [
             "کنترل‌پلن مدیر: صدور توکن ثبت‌نام، مدیریت عوامل، تسک‌های تشخیصی، اسکریپت "
             "پایتون مدیریتی و تاریخچه‌ی حسابرسی. فقط با ADMIN_API_TOKEN؛ مدل زبانی به "
             "این مسیرها و کلیدها دسترسی ندارد."
+        ),
+    },
+    {
+        "name": "داشبورد مدیریتی",
+        "description": (
+            "نمای تجمیعی مخصوص داشبورد وب (`/dashboard`): آمار کلی عوامل، هشدارها، "
+            "روند فعالیت و حسابرسی اخیر در یک پاسخ. فقط با ADMIN_API_TOKEN و فقط "
+            "خواندنی؛ عملیات مدیریتی همچنان در `/api/admin/v1` انجام می‌شود."
         ),
     },
     {
@@ -132,6 +143,31 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
     app.include_router(router)
     app.include_router(agent_router)
     app.include_router(admin_router)
+    app.include_router(dashboard_router)
+
+    # -- dashboard SPA (built frontend; optional in dev/test) ------------------
+    # /dashboard serves dashboard/dist (Vite build, base="/dashboard/").
+    # Missing file paths fall back to index.html so client-side routes
+    # (/dashboard/agents/{id}) survive a hard refresh. Swagger at /api/docs
+    # and /openapi.json are completely unaffected by this mount.
+    dist = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+
+    class _SPAFallback(StaticFiles):
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            response = await super().get_response(path, scope)
+            if response.status_code == 404 and "." not in path.split("/")[-1]:
+                # SPA route → serve the app shell; missing asset files (which
+                # have an extension) still 404 loudly
+                return await super().get_response("index.html", scope)
+            return response
+
+    if dist.is_dir():
+        app.mount("/dashboard", _SPAFallback(directory=dist, html=True), name="dashboard")
+
+    @app.get("/", include_in_schema=False)
+    def root_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/dashboard")
+
     return app
 
 

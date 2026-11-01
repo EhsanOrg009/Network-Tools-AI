@@ -7,6 +7,7 @@ import { StatCard, Card, EmptyState, ErrorState, Skeleton, StatusPill } from "..
 import { BarList, CHART_COLORS, Donut, TrendChart } from "../components/charts";
 import { IconAgents, IconGauge, IconShield, IconWifi, IconInbox, IconTerminal, IconHeartbeat } from "../components/icons";
 import { severityLabel } from "../lib/format";
+import { CommandCenter } from "../components/CommandCenter";
 
 export default function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
@@ -81,6 +82,10 @@ export default function OverviewPage() {
         <StatCard label="نشست‌های کنسول فعال" value={faNum(data.console_sessions_active)}
           hint={`${faNum(data.tasks.pending ?? 0)} تسک در صف`}
           icon={<IconTerminal size={19} />} color={CHART_COLORS.accent} />
+      </div>
+
+      <div className="section-gap" style={{ marginBottom: 14 }}>
+        <CommandCenter />
       </div>
 
       <div className="grid-2">

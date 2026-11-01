@@ -24,3 +24,6 @@ data/
 # Dashboard build
 node_modules/
 dashboard/dist/
+
+# TS incremental build
+dashboard/tsconfig.tsbuildinfo

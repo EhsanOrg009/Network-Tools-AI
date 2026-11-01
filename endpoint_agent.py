@@ -1006,6 +1006,10 @@ class EndpointAgent:
                 raise SystemExit(2)
             self.client = ApiClient(self.server_url, self.state.agent_token,
                                     ca_bundle=os.environ.get("NETAGENT_CA_BUNDLE"))
+        else:
+            # credential may have just been granted by self-registration:
+            # keep the cached connection's token in step with the state file
+            self.client.agent_token = self.state.agent_token
         return self.client
 
     # -- enrollment ------------------------------------------------------------

@@ -396,6 +396,109 @@ def reject_enrollment_request(
 
 
 # ---------------------------------------------------------------------------
+# AI security-alert analyses (background LLM analysis queue)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/ai-analyses",
+    tags=["مدیریت مدیر شبکه"],
+    summary="فهرست تحلیل‌های هوش مصنوعی هشدارهای امنیتی",
+    description=(
+        "خروجی کارگر پس‌زمینه‌ی تحلیل: برای هر هشدار، وضعیت (`PENDING` یا "
+        "`PROCESSING` یا `COMPLETED` یا `FAILED`) و در صورت آماده بودن، خلاصه، "
+        "اهمیت، شواهد، احتمال غیرعادی بودن، اطمینان و پیشنهاد اقدام. تحلیل "
+        "**برداشت مدل** است نه واقعیت قطعی؛ هشدار = تطابق قانون، نه اثبات نفوذ. "
+        "صفحه‌ی Security داشبورد این داده را با فهرست هشدارها ادغام می‌کند."
+    ),
+    responses=_responses(
+        "فهرست تحلیل‌ها به ترتیب هشدار.",
+        {"items": [{
+            "alert_id": 34,
+            "status": "COMPLETED",
+            "summary": "تطابق امضای نسخه‌ی قدیمی TLS؛ رفتار رایج شبکه‌های داخلی است.",
+            "importance": "low",
+            "evidence": ["signature=SURICATA TLS Obsolete Version", "action=allowed"],
+            "anomaly_likelihood": "low",
+            "confidence": "medium",
+            "recommendation": "بررسی نسخه‌ی TLS سرویس مقصد در فرصت مناسب کافی است.",
+            "model": "gemma-4-e2b-it-q4_0--2-:latest",
+            "prompt_version": "alert-analysis-v1",
+            "analyzed_at": "2026-11-01T10:00:00+00:00",
+        }]},
+    ),
+)
+def list_ai_analyses(
+    request: Request,
+    status: str | None = Query(
+        None, description="فیلتر وضعیت: PENDING یا PROCESSING یا COMPLETED یا FAILED."
+    ),
+    limit: int = Query(300, ge=1, le=1000, description="حداکثر تعداد ردیف."),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    return {"items": db.list_alert_analyses(status=status, limit=limit)}
+
+
+@router.post(
+    "/ai-analyses/{alert_id}/reanalyze",
+    tags=["مدیریت مدیر شبکه"],
+    summary="درخواست تحلیل مجدد یک هشدار",
+    description=(
+        "رکورد تحلیل به `PENDING` برمی‌گردد و بودجه‌ی تلاش دوباره فعال می‌شود؛ "
+        "کارگر پس‌زمینه آن را دوباره به مدل می‌دهد. نتیجه‌ی قبلی تا آماده شدن "
+        "نتیجه‌ی جدید باقی می‌ماند."
+    ),
+    responses=_responses(
+        "وضعیت رکورد پس از درخواست.",
+        {"alert_id": 34, "status": "PENDING", "queued": True},
+        not_found="برای این هشدار تحلیلی ثبت نشده است.",
+    ),
+)
+def reanalyze_alert(
+    request: Request,
+    alert_id: int = Path(description="شناسه‌ی هشدار.", examples=[34]),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    ok = db.reset_alert_analysis(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="برای این هشدار تحلیلی ثبت نشده است.")
+    db.record_audit(actor=actor, action="ai_analysis.reanalyze", target=str(alert_id))
+    return {"alert_id": alert_id, "status": "PENDING", "queued": True}
+
+
+# ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
 

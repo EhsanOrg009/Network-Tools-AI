@@ -291,6 +291,25 @@ CREATE TABLE IF NOT EXISTS enrollment_requests (
     enrolled_agent_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_enrollreq_status ON enrollment_requests(status, requested_epoch);
+
+CREATE TABLE IF NOT EXISTS alert_analyses (
+    alert_id INTEGER PRIMARY KEY REFERENCES alerts(id),
+    fingerprint TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    summary TEXT,
+    importance TEXT,
+    evidence_json TEXT,
+    anomaly_likelihood TEXT,
+    confidence TEXT,
+    recommendation TEXT,
+    model TEXT,
+    prompt_version TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    analyzed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alertanal_status ON alert_analyses(status, alert_id);
 """
 
 
@@ -1857,6 +1876,156 @@ class Database:
         return cur.rowcount
 
     # -- enrollment tokens end ---------------------------------------------------
+
+    # =========================================================================
+    # AI alert analyses (v5): background LLM analysis of security alerts
+    # =========================================================================
+
+    def enqueue_alert_analysis(self, *, alert_id: int, fingerprint: str) -> bool:
+        """Insert a PENDING analysis row; False when it already exists."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO alert_analyses(alert_id, fingerprint, status, created_at)
+                VALUES(?, ?, 'PENDING', ?)
+                """,
+                (alert_id, fingerprint, _now_iso()),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def claim_next_alert_analysis(
+        self, *, max_attempts: int = 3, now_epoch: float | None = None
+    ) -> dict[str, Any] | None:
+        """Atomically claim one retryable row (oldest first) as PROCESSING.
+
+        FAILED rows are retryable until ``max_attempts`` is exhausted.
+        """
+        now_epoch = now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT a.alert_id FROM alert_analyses a
+                    WHERE a.status = 'PENDING'
+                       OR (a.status = 'FAILED' AND a.attempts < ?)
+                    ORDER BY a.alert_id ASC LIMIT 1
+                    """,
+                    (max_attempts,),
+                ).fetchone()
+                if row is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        self.start_alert_analysis(row["alert_id"])
+        return self.get_alert_analysis(row["alert_id"])
+
+    def get_alert_analysis(self, alert_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM alert_analyses WHERE alert_id = ?", (alert_id,)
+            ).fetchone()
+        return self._alert_analysis_row_to_dict(row) if row else None
+
+    @staticmethod
+    def _alert_analysis_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        if d.get("evidence_json"):
+            try:
+                d["evidence"] = json.loads(d.pop("evidence_json"))
+            except (TypeError, ValueError):
+                d.pop("evidence_json", None)
+        else:
+            d.pop("evidence_json", None)
+        return d
+
+    def start_alert_analysis(self, alert_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE alert_analyses SET status = 'PROCESSING' WHERE alert_id = ?",
+                (alert_id,),
+            )
+            self._conn.commit()
+
+    def complete_alert_analysis(
+        self, alert_id: int, *, analysis: dict[str, Any], model: str, prompt_version: str
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE alert_analyses SET status = 'COMPLETED',
+                       summary = ?, importance = ?, evidence_json = ?,
+                       anomaly_likelihood = ?, confidence = ?, recommendation = ?,
+                       model = ?, prompt_version = ?, error = NULL,
+                       attempts = attempts + 1, analyzed_at = ?
+                WHERE alert_id = ?
+                """,
+                (
+                    analysis.get("summary"),
+                    analysis.get("importance"),
+                    json.dumps(analysis.get("evidence") or [], ensure_ascii=False),
+                    analysis.get("anomaly_likelihood"),
+                    analysis.get("confidence"),
+                    analysis.get("recommendation"),
+                    model, prompt_version, _now_iso(), alert_id,
+                ),
+            )
+            self._conn.commit()
+
+    def fail_alert_analysis(self, alert_id: int, *, error: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE alert_analyses SET status = 'FAILED', error = ?,
+                       attempts = attempts + 1, analyzed_at = ?
+                WHERE alert_id = ?
+                """,
+                (error[:500], _now_iso(), alert_id),
+            )
+            self._conn.commit()
+
+    def reset_alert_analysis(self, alert_id: int) -> bool:
+        """Administrator re-analyze: back to PENDING, retry budget restored."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE alert_analyses SET status = 'PENDING', error = NULL, attempts = 0
+                WHERE alert_id = ?
+                """,
+                (alert_id,),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_alert_analyses(
+        self, *, status: str | None = None, limit: int = 300, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM alert_analyses {cond}
+                ORDER BY alert_id DESC LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+        return [self._alert_analysis_row_to_dict(r) for r in rows]
+
+    def pending_alert_analysis_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM alert_analyses WHERE status IN ('PENDING', 'PROCESSING')"
+            ).fetchone()
+        return int(row["c"])
 
     def list_audit(
         self, *, action: str | None = None, limit: int = 100, offset: int = 0

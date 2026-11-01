@@ -478,3 +478,25 @@ class ClaimRequest(BaseModel):
 
 class EnrollmentRejectBody(BaseModel):
     reason: str | None = Field(default=None, max_length=500, description="دلیل رد (برای سابقه).")
+
+
+# ---------------------------------------------------------------------------
+# AI security-alert analysis (v5)
+# ---------------------------------------------------------------------------
+
+
+class AlertAnalysis(BaseModel):
+    """خروجی ساختاریافته‌ی تحلیل هشدار توسط مدل — پیش از ذخیره اعتبارسنجی می‌شود."""
+
+    model_config = {"extra": "ignore"}
+
+    summary: str = Field(description="خلاصه و تفسیر رویداد (فارسی).")
+    importance: Literal["low", "medium", "high"] = Field(description="اهمیت امنیتی.")
+    evidence: list[str] = Field(default_factory=list, description="شواهد مشخص موجود در خود رکورد.")
+    anomaly_likelihood: Literal["low", "medium", "high", "unknown"] = Field(
+        description="احتمال غیرعادی بودن رفتار (تشخیص، نه قطعیت)."
+    )
+    confidence: Literal["low", "medium", "high", "unknown"] = Field(
+        description="میزان اطمینان تحلیل."
+    )
+    recommendation: str = Field(description="پیشنهاد اقدام بعدی برای مدیر شبکه (فارسی).")

@@ -140,6 +140,18 @@ class Settings(BaseSettings):
     registration_rate_limit_per_hour: int = Field(default=30, ge=1, le=1000)
 
     # ------------------------------------------------------------------
+    # Background AI analysis of security alerts (v5)
+    # ------------------------------------------------------------------
+    # Uses the SAME local LLM client as investigations (no second client).
+    # The worker runs in a daemon thread; API latency never depends on it.
+    ai_analysis_enabled: bool = True
+    ai_analysis_max_attempts: int = Field(default=3, ge=1, le=10)
+    ai_analysis_poll_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
+    # Upper bound on PENDING rows created per sweep — the queue can grow
+    # gradually but never without bound.
+    ai_analysis_backlog_limit: int = Field(default=200, ge=10, le=5000)
+
+    # ------------------------------------------------------------------
     # Administrator control plane (v3) — disabled unless explicitly configured
     # ------------------------------------------------------------------
     # ADMIN_API_TOKEN (plaintext, >=16 chars) or ADMIN_API_TOKEN_SHA256.

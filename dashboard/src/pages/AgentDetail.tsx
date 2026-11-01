@@ -14,6 +14,7 @@ import { IconAgents, IconHeartbeat } from "../components/icons";
 import { useToast } from "../components/toast";
 import RemoteConsole from "../components/RemoteConsole";
 import TrafficMonitor from "../components/TrafficMonitor";
+import ScreenCapture from "../components/ScreenCapture";
 
 const TASK_TYPE_FA: Record<string, string> = {
   inventory_collection: "فهرست‌برداری سیستم و شبکه",
@@ -329,30 +330,33 @@ export default function AgentDetailPage() {
       )}
 
       {tab === "manage" && (
-        <div className="grid-half">
-          <Card title="وضعیت ارتباط و همگام‌سازی">
-            <dl className="two-col-defs">
-              <dt>وضعیت</dt><dd><StatusPill state={a.status} pulse={a.status === "active"} /></dd>
-              <dt>فاصله ضربان پیکربندی‌شده</dt><dd>{fmtSeconds(a.heartbeat_interval_seconds)}</dd>
-              <dt>ثبت‌نام</dt><dd>{fmtDateTime(a.enrolled_at)}</dd>
-              <dt>تسک در صف</dt>
-              <dd>{faNum(tasks?.filter((t) => ["pending", "dispatched"].includes(t.status)).length ?? 0)}</dd>
-            </dl>
-            <div className="divider" />
-            <div className="small muted">
-              برای دریافت inventory تازه می‌توانید از تب عیب‌یابی، تسک
-              «فهرست‌برداری» را صادر کنید. این صفحه با به‌روزرسانی ضربان، داده تازه را نشان می‌دهد.
-            </div>
-          </Card>
-          <Card title="عملیات حساس" extra={<span className="badge badge-danger">نهایی</span>}>
-            <div className="small" style={{ color: "var(--text-2)", lineHeight: 1.9, marginBottom: 14 }}>
-              باطل‌سازی دسترسی، اعتبارنامه‌ی عامل را بی‌اثر می‌کند: ضربان، inventory و هیچ تسکی
-              دیگر پذیرفته نمی‌شود. عملیات در حسابرسی با برچسب مدیر ثبت می‌شود.
-            </div>
-            <button className="btn danger" disabled={a.status === "revoked"} onClick={() => setRevokeOpen(true)}>
-              {a.status === "revoked" ? "این عامل باطل شده است" : "باطل‌سازی دسترسی عامل"}
-            </button>
-          </Card>
+        <div>
+          <div className="grid-half" style={{ marginBottom: 14 }}>
+            <Card title="وضعیت ارتباط و همگام‌سازی">
+              <dl className="two-col-defs">
+                <dt>وضعیت</dt><dd><StatusPill state={a.status} pulse={a.status === "active"} /></dd>
+                <dt>فاصله ضربان پیکربندی‌شده</dt><dd>{fmtSeconds(a.heartbeat_interval_seconds)}</dd>
+                <dt>ثبت‌نام</dt><dd>{fmtDateTime(a.enrolled_at)}</dd>
+                <dt>تسک در صف</dt>
+                <dd>{faNum(tasks?.filter((t) => ["pending", "dispatched"].includes(t.status)).length ?? 0)}</dd>
+              </dl>
+              <div className="divider" />
+              <div className="small muted">
+                برای دریافت inventory تازه می‌توانید از تب عیب‌یابی، تسک
+                «فهرست‌برداری» را صادر کنید. این صفحه با به‌روزرسانی ضربان، داده تازه را نشان می‌دهد.
+              </div>
+            </Card>
+            <Card title="عملیات حساس" extra={<span className="badge badge-danger">نهایی</span>}>
+              <div className="small" style={{ color: "var(--text-2)", lineHeight: 1.9, marginBottom: 14 }}>
+                باطل‌سازی دسترسی، اعتبارنامه‌ی عامل را بی‌اثر می‌کند: ضربان، inventory و هیچ تسکی
+                دیگر پذیرفته نمی‌شود. عملیات در حسابرسی با برچسب مدیر ثبت می‌شود.
+              </div>
+              <button className="btn danger" disabled={a.status === "revoked"} onClick={() => setRevokeOpen(true)}>
+                {a.status === "revoked" ? "این عامل باطل شده است" : "باطل‌سازی دسترسی عامل"}
+              </button>
+            </Card>
+          </div>
+          <ScreenCapture agentId={agentId} />
         </div>
       )}
 

@@ -442,7 +442,13 @@ def inventory(
 def traffic(
     request: Request,
     body: TrafficSampleRequest,
-    authorization: str | None = Header(default=None),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <توکن عامل>` صادرشده هنگام ثبت‌نام. "
+            "توکن مدیر در این مسیر پذیرفته نمی‌شود."
+        ),
+    ),
 ) -> dict[str, Any]:
     db, settings = _ctx(request)
     agent = _agent_or_error(request, authorization)

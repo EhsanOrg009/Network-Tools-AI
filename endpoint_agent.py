@@ -793,6 +793,90 @@ def run_admin_script(params: dict, timeout_seconds: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# On-demand screen capture (explicit local opt-in: --allow-screenshot)
+# ---------------------------------------------------------------------------
+
+# Fixed candidate commands per platform, tried in order; first success wins.
+# No command is invented, nothing is installed, and missing tools/desktop
+# sessions produce a precise structured error instead of a fake image.
+_SCREENSHOT_LINUX_CANDIDATES: list[list[str]] = [
+    ["gnome-screenshot", "-f"],
+    ["spectacle", "-b", "-n", "-o"],
+    ["scrot", "-o"],
+    ["import", "-window", "root"],
+]
+
+
+def capture_screen(params: dict, timeout_seconds: int) -> dict:
+    """One-shot screenshot of the local (agent's own) desktop session.
+
+    Privacy/policy: capability must be enabled locally (--allow-screenshot);
+    on-demand only; the PNG travels once inside the signed task result and is
+    not persisted beyond the task's bounded retention.
+    """
+    import base64 as _b64
+    import os as _os
+    import tempfile as _tmp
+
+    started = time.monotonic()
+    timeout = max(10, int(timeout_seconds or 45))
+    if IS_WINDOWS:
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+            "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen;"
+            "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height;"
+            "$g = [System.Drawing.Graphics]::FromImage($bmp);"
+            "$g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size);"
+            "$ms = New-Object System.IO.MemoryStream;"
+            "$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);"
+            "[Convert]::ToBase64String($ms.ToArray())"
+        )
+        rc, out, err = _run_cmd(["powershell", "-NoProfile", "-NonInteractive",
+                                 "-ExecutionPolicy", "Bypass", "-Command", ps],
+                                timeout=timeout)
+        if rc != 0 or not out.strip():
+            return {"ok": False,
+                    "error": (f"no desktop session or capture failed: {err[:200] or rc}"),
+                    "platform": "windows"}
+        png = _b64.b64decode(out.strip())
+        return {"ok": True, "format": "png", "size_bytes": len(png),
+                "data_base64": _b64.b64encode(png).decode("ascii"),
+                "duration_ms": round((time.monotonic() - started) * 1000, 1)}
+
+    # Linux: try Wayland-native (grim) first when present, then X11 tools.
+    # All candidates write to an output file (grim accepts a filename), so
+    # binary data never travels through the text-decoded stdout pipe.
+    candidates = list(_SCREENSHOT_LINUX_CANDIDATES)
+    if _os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or _os.environ.get("WAYLAND_DISPLAY"):
+        candidates.insert(0, ["grim"])
+    for argv in candidates:
+        fd, path = _tmp.mkstemp(suffix=".png")
+        _os.close(fd)
+        try:
+            rc, out, err = _run_cmd([*argv, path], timeout=timeout)
+            if rc != 0 or not _os.path.getsize(path):
+                continue
+            with open(path, "rb") as fh:
+                png = fh.read()
+            if not png.startswith(b"\x89PNG"):
+                continue
+            return {"ok": True, "format": "png", "size_bytes": len(png),
+                    "data_base64": _b64.b64encode(png).decode("ascii"),
+                    "tool": argv[0],
+                    "duration_ms": round((time.monotonic() - started) * 1000, 1)}
+        finally:
+            try:
+                _os.unlink(path)
+            except OSError:
+                pass
+    return {"ok": False,
+            "error": ("no screenshot tool available (gnome-screenshot/spectacle/"
+                      "scrot/import/grim) یا نشست گرافیکی در دسترس نیست؛ "
+                      "بدون دسترسی، تصویر ساختگی تولید نمی‌شود"),
+            "platform": "linux"}
+
+
+# ---------------------------------------------------------------------------
 # Interactive console: persistent interpreter subprocess per session
 # ---------------------------------------------------------------------------
 
@@ -1053,6 +1137,7 @@ class EndpointAgent:
         self.poll_interval = max(1.0, float(getattr(args, "poll_interval", 5.0) or 5.0))
         self.allow_admin_exec = bool(getattr(args, "allow_admin_exec", False))
         self.allow_admin_console = bool(getattr(args, "allow_admin_console", False))
+        self.allow_screenshot = bool(getattr(args, "allow_screenshot", False))
         self.allow_insecure_http = bool(getattr(args, "allow_insecure_http", False))
         self.enable_traffic = bool(getattr(args, "enable_traffic", False))
         self.console = ConsoleManager(max_sessions=3)
@@ -1071,6 +1156,8 @@ class EndpointAgent:
             caps.append("console")
         if self.enable_traffic:
             caps.append("traffic")
+        if self.allow_screenshot:
+            caps.append("screenshot")
         return caps
 
     # -- http ------------------------------------------------------------------
@@ -1279,7 +1366,7 @@ class EndpointAgent:
                                 "duplicate task rejected (already executed)")
             return
         if ttype in ("admin_python_script", "console_session",
-                     "console_command", "console_terminate"):
+                     "console_command", "console_terminate", "screen_capture"):
             ok, reason = verify_envelope(
                 message, self.signing_key, self.state.agent_id or "",
                 seen_nonces=self.state.data.setdefault("seen_envelope_nonces", []),
@@ -1295,6 +1382,10 @@ class EndpointAgent:
             if ttype.startswith("console") and not self.allow_admin_console:
                 self._submit_result(task_id, False, None,
                                     "console disabled locally (--allow-admin-console)")
+                return
+            if ttype == "screen_capture" and not self.allow_screenshot:
+                self._submit_result(task_id, False, None,
+                                    "screen capture disabled locally (--allow-screenshot)")
                 return
 
         result, ok = self._dispatch_by_type(ttype, message.get("params") or {},
@@ -1321,6 +1412,9 @@ class EndpointAgent:
                 return result, bool(result.get("ok"))
             if ttype == "admin_python_script":
                 result = run_admin_script(params, timeout_seconds)
+                return result, bool(result.get("ok"))
+            if ttype == "screen_capture":
+                result = capture_screen(params, timeout_seconds)
                 return result, bool(result.get("ok"))
             if ttype == "console_session":
                 try:
@@ -1465,6 +1559,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="فقط تست محلی: اجازه‌ی http بدون رمزنگاری")
     run.add_argument("--enable-traffic", action="store_true",
                      help="ارسال دوره‌ای متادیتای ترافیک همین سیستم (شمارنده‌ها + اتصال‌های فعال؛ بدون payload)")
+    run.add_argument("--allow-screenshot", action="store_true",
+                     help="اجازه‌ی گرفتن تصویر صفحه‌ی همین سیستم فقط با درخواست امضاشده‌ی مدیر (پیش‌فرض: خاموش)")
 
     for name, help_text in (
         ("status", "نمایش وضعیت محلی (بدون افشای توکن)"),

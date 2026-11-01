@@ -42,6 +42,7 @@ CAPABILITY_TO_TASK_TYPES: dict[str, tuple[str, ...]] = {
     "approved_network_diagnostic": ("approved_network_diagnostic",),
     "admin_exec": ("admin_python_script",),
     "console": ("console_session", "console_command", "console_terminate"),
+    "screenshot": ("screen_capture",),
 }
 DEFAULT_CAPABILITIES = ("inventory", "connectivity_diagnostic", "service_inventory",
                         "network_configuration", "approved_network_diagnostic")
@@ -233,6 +234,8 @@ def dispatch_task(
                 continue
             if types[0].startswith("console") and not settings.allow_admin_python_console:
                 continue
+            if types[0] == "screen_capture" and not settings.allow_admin_screenshot:
+                continue
             if not (settings.task_signing_key or "").strip():
                 continue
         allowed.update(types)
@@ -288,7 +291,12 @@ def complete_task_from_agent(
             ok=ok,
             result=_bound_result(result, settings.agent_max_task_result_bytes),
             error=(error or None),
-            max_result_bytes=settings.agent_max_task_result_bytes,
+            # screenshots ride in the result; their cap is the dedicated one
+            max_result_bytes=(
+                settings.screenshot_max_bytes
+                if task["type"] == "screen_capture"
+                else settings.agent_max_task_result_bytes
+            ),
         )
     # Already finished/expired/cancelled: report the current state without
     # storing a second result (duplicate-execution protection).

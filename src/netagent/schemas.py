@@ -224,6 +224,7 @@ ADMIN_TASK_TYPES = (
     "console_session",
     "console_command",
     "console_terminate",
+    "screen_capture",
 )
 KNOWN_TASK_TYPES = DIAGNOSTIC_TASK_TYPES + ADMIN_TASK_TYPES
 

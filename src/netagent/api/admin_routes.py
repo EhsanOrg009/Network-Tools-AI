@@ -653,7 +653,13 @@ def get_agent_traffic(
             "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
         ),
     ),
-    x_admin_actor: str | None = Header(default=None),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
 ) -> dict[str, Any]:
     db, _ = _ctx(request)
     _guard(request, authorization, x_admin_actor)
@@ -1043,6 +1049,172 @@ def submit_script(
                 "timeout_seconds": body.timeout_seconds, "note": body.note},
     )
     return task
+
+
+# ---------------------------------------------------------------------------
+# Remote screen capture (screenshot on demand)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/agents/{agent_id}/screenshot",
+    tags=["مدیریت مدیر شبکه"],
+    summary="درخواست یک‌باره‌ی تصویر صفحه‌ی عامل",
+    description=(
+        "**فقط مدیر؛ LLM دسترسی ندارد.** نیازمند `ALLOW_ADMIN_SCREENSHOT=true` و "
+        "`TASK_SIGNING_KEY` روی سرور و قابلیت `screenshot` روی عامل (اجرای عامل با "
+        "`--allow-screenshot` = فعال‌سازی صریح و آگاهانه در خود دستگاه). تسک "
+        "امضاشده‌ی `screen_capture` ایجاد می‌شود؛ عامل با ابزارهای بومی سیستم‌عامل "
+        "(بدون ارتقای دسترسی) تصویر می‌گیرد و PNG داخل نتیجه‌ی محدود برمی‌گردد. "
+        "در نبود نشست گرافیکی/ابزار، خطای شفاف می‌آید — نه تصویر ساختگی. وضعیت را "
+        "با `GET /api/admin/v1/tasks/{task_id}` دنبال کنید و تصویر را با "
+        "`GET /api/admin/v1/agents/{agent_id}/screenshot/{task_id}` بگیرید."
+    ),
+    responses=_responses(
+        "شناسه‌ی تسک ایجادشده.",
+        {"task_id": "task_88aa11bb22cc", "agent_id": "agt_9f2c41ba07c3",
+         "type": "screen_capture", "status": "pending",
+         "poll": "GET /api/admin/v1/tasks/task_88aa11bb22cc"},
+        not_found="عاملی با این شناسه وجود ندارد.",
+    ),
+)
+def request_screenshot(
+    request: Request,
+    agent_id: str = Path(description="شناسه‌ی عامل هدف.", examples=["agt_9f2c41ba07c3"]),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    if not settings.allow_admin_screenshot:
+        raise HTTPException(
+            status_code=403,
+            detail="قابلیت تصویر صفحه روی این سرور غیرفعال است (ALLOW_ADMIN_SCREENSHOT).",
+        )
+    if not (settings.task_signing_key or "").strip():
+        raise HTTPException(status_code=403,
+                            detail="TASK_SIGNING_KEY تنظیم نشده است؛ تسک امضاشده قابل صدور نیست.")
+    agent = db.get_agent(agent_id)
+    if agent is None or agent.get("status") == "revoked":
+        raise HTTPException(status_code=404, detail="agent not found")
+    if "screenshot" not in (agent.get("capabilities") or []):
+        raise HTTPException(
+            status_code=400,
+            detail="عامل مقصد قابلیت screenshot را اعلام نکرده است (اجرای عامل با --allow-screenshot).",
+        )
+    task_id = task_service.new_task_id()
+    db.create_task(
+        task_id=task_id,
+        agent_id=agent_id,
+        type="screen_capture",
+        params={"note": "on-demand screenshot by administrator"},
+        origin="admin",
+        created_by=actor,
+        timeout_seconds=60,
+        ttl_seconds=300,
+        priority=2,
+    )
+    db.record_audit(actor=actor, action="screenshot.request", target=agent_id,
+                    detail={"task_id": task_id})
+    return {
+        "task_id": task_id,
+        "agent_id": agent_id,
+        "type": "screen_capture",
+        "status": "pending",
+        "poll": f"GET /api/admin/v1/tasks/{task_id}",
+    }
+
+
+@router.get(
+    "/agents/{agent_id}/screenshot/{task_id}",
+    tags=["مدیریت مدیر شبکه"],
+    summary="دریافت تصویر PNG ثبت‌شده در نتیجه‌ی تسک",
+    description=(
+        "تصویر دریافتی از عامل را به‌صورت `image/png` برمی‌گرداند. تصویر فقط در "
+        "نتیجه‌ی همان تسک (با نگه‌داری محدود تسک‌ها) زندگی می‌کند — ذخیره‌ی "
+        "دائمی ندارد. تسک ناتمام/ناموفق با وضعیت HTTP مناسب و پیام فارسی رد می‌شود."
+    ),
+    responses={
+        200: {
+            "description": "تصویر PNG.",
+            "content": {"image/png": {"schema": {"type": "string", "format": "binary"}}},
+        },
+        401: {"description": "توکن مدیر لازم است.",
+              "content": {"application/json": {"examples": _ERR_401}}},
+        404: {"description": "تسک یافت نشد.",
+              "content": {"application/json": {"examples": {"default": {"value": {"detail": "task not found"}}}}}},
+        409: {"description": "تسک هنوز تمام نشده یا شکست خورده است.",
+              "content": {"application/json": {"examples": {"default": {"value": {
+                  "detail": "screenshot task status is 'dispatched'",
+                  "task_status": "dispatched"}}}}}},
+        422: {"description": "ورودی نامعتبر است؛ ساختار detail شرح خطا را می‌دهد.",
+              "content": {"application/json": {"examples": {"validation": {"value": {
+                  "detail": [{"type": "int_parsing", "loc": ["path", "alert_id"],
+                              "msg": "Input should be a valid integer"}]}}}}}},
+    },
+)
+def fetch_screenshot(
+    request: Request,
+    agent_id: str = Path(description="شناسه‌ی عامل.", examples=["agt_9f2c41ba07c3"]),
+    task_id: str = Path(description="شناسه‌ی تسک تصویر.", examples=["task_88aa11bb22cc"]),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض) "
+            "و اعتبارنامه‌ی عامل نقطه‌پایان در این مسیرها پذیرفته نمی‌شود."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description=(
+            "هدر اختیاری `X-Admin-Actor`: برچسب منتسب به مدیر در گزارش حسابرسی "
+            "(اتریبیوشن)، نه اعتبارنامه. مثال: `admin-ops`."
+        ),
+    ),
+) -> Any:
+    import base64 as _b64
+
+    from fastapi.responses import Response as _Response
+
+    db, _settings = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    task = db.get_task(task_id)
+    if task is None or task.get("agent_id") != agent_id:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.get("type") != "screen_capture":
+        raise HTTPException(status_code=400, detail="task is not a screen_capture")
+    if task.get("status") != "succeeded":
+        if task.get("status") == "failed" and task.get("error"):
+            raise HTTPException(status_code=409, detail=str(task["error"]))
+        raise HTTPException(
+            status_code=409,
+            detail=f"screenshot task status is '{task.get('status')}'",
+        )
+    result = task.get("result") or {}
+    data = result.get("data_base64")
+    if not result.get("ok") or not data:
+        raise HTTPException(status_code=409,
+                            detail=result.get("error") or "تصویری در نتیجه‌ی تسک نیست.")
+    try:
+        png = _b64.b64decode(str(data))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="تصویر ذخیره‌شده قابل رمزگشایی نیست.") from exc
+    return _Response(content=png, media_type="image/png",
+                     headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------

@@ -43,9 +43,11 @@ EXPECTED_ENDPOINTS = {
     ("POST", "/api/agent/v1/status"),
     ("GET", "/api/agent/v1/tasks/next"),
     ("POST", "/api/agent/v1/tasks/{task_id}/result"),
+    ("POST", "/api/agent/v1/traffic"),
     # — administrator control plane (ADMIN_API_TOKEN credentials) —
     ("GET", "/api/admin/v1/agents"),
     ("GET", "/api/admin/v1/agents/{agent_id}"),
+    ("GET", "/api/admin/v1/agents/{agent_id}/traffic"),
     ("POST", "/api/admin/v1/agents/{agent_id}/revoke"),
     ("POST", "/api/admin/v1/agents/{agent_id}/scripts"),
     ("POST", "/api/admin/v1/agents/{agent_id}/console/sessions"),
@@ -71,6 +73,8 @@ EXPECTED_ENDPOINTS = {
     ("GET", "/api/admin/v1/networks"),
     ("GET", "/api/admin/v1/ai-analyses"),
     ("POST", "/api/admin/v1/ai-analyses/{alert_id}/reanalyze"),
+    ("POST", "/api/admin/v1/agents/{agent_id}/screenshot"),
+    ("GET", "/api/admin/v1/agents/{agent_id}/screenshot/{task_id}"),
     ("GET", "/api/admin/v1/audit"),
 }
 
@@ -214,13 +218,21 @@ def test_investigation_example_matches_scope_rules(openapi):
 
 def test_every_endpoint_has_a_200_response_example(openapi):
     for (method, path), op in _operations(openapi).items():
-        content = op["responses"]["200"]["content"]["application/json"]
-        examples = content.get("examples") or {}
+        content = op["responses"]["200"].get("content") or {}
+        if "application/json" not in content or any(
+            mt.startswith("image/") for mt in content
+        ):
+            # binary/media responses (e.g. image/png) are documented by their
+            # media type + schema; no JSON example exists to check
+            assert content, f"{method} {path}: 200 response has no documented content"
+            continue
+        media = content["application/json"]
+        examples = media.get("examples") or {}
         has_example = examples.get("default", {}).get("value") is not None \
-            or content.get("example") is not None \
-            or content.get("schema", {}).get("example") is not None
+            or media.get("example") is not None \
+            or media.get("schema", {}).get("example") is not None
         assert has_example, f"{method} {path}: 200 response has no example"
-        value = examples.get("default", {}).get("value", content.get("example"))
+        value = examples.get("default", {}).get("value", media.get("example"))
         assert isinstance(value, dict), f"{method} {path}: response example not an object"
 
 

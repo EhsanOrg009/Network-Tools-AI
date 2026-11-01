@@ -172,6 +172,11 @@ class Settings(BaseSettings):
     # Master switches for the two administrator-only remote-execution features.
     allow_admin_python_exec: bool = False
     allow_admin_python_console: bool = False
+    # On-demand screen capture of an endpoint (agent must also opt in
+    # locally with --allow-screenshot). Images are never stored long-term:
+    # they live inside the bounded task result.
+    allow_admin_screenshot: bool = False
+    screenshot_max_bytes: int = Field(default=6 * 1024 * 1024, ge=64 * 1024, le=32 * 1024 * 1024)
     admin_script_max_bytes: int = Field(default=64 * 1024, ge=256, le=1024 * 1024)
     admin_script_max_runtime_seconds: int = Field(default=60, ge=5, le=3600)
     admin_script_output_max_bytes: int = Field(default=64 * 1024, ge=1024)

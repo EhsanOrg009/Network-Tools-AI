@@ -1,18 +1,34 @@
 /**
- * Network discovery: subnets observed by agents + discovered hosts +
- * a topology view derived ONLY from real observations (agent → network → host
- * edges that were actually seen; no invented connections).
+ * Network discovery page.
+ *
+ * Three concepts, deliberately kept separate (never merged):
+ *  - Observed:  what agents actually reported (`observations`)
+ *  - Configured: what the operator defined (`effective_scope.configured_cidrs`
+ *    + `authorized_targets`)
+ *  - Authorized for active discovery: policy verdict (`auto_discovered` +
+ *    `auto_discovery_enabled`) — observing a network never implies it may be
+ *    scanned.
+ *
+ * Topology edges are drawn only from real containment checks (ipaddr.js),
+ * never from string prefixes.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../lib/api";
-import type { NetworkRow, HostRow, AgentSummary } from "../lib/types";
+import { api, ApiError } from "../lib/api";
+import { ipInCidr, isValidCidr } from "../lib/cidr";
+import { parseNetworksResponse } from "../lib/validate";
+import type { AgentSummary, EffectiveDiscoveryScope, HostRow, NetworkObservationRow } from "../lib/types";
 import { faNum, fmtAgo } from "../lib/format";
 import { Card, EmptyState, ErrorState, SkeletonRows, TechChip } from "../components/ui";
 import { IconWifi } from "../components/icons";
 
+interface Loaded {
+  observations: NetworkObservationRow[];
+  scope: EffectiveDiscoveryScope;
+}
+
 export default function DiscoveryPage() {
-  const [networks, setNetworks] = useState<NetworkRow[] | null>(null);
+  const [data, setData] = useState<Loaded | null>(null);
   const [hosts, setHosts] = useState<HostRow[] | null>(null);
   const [agents, setAgents] = useState<AgentSummary[] | null>(null);
   const [q, setQ] = useState("");
@@ -20,18 +36,23 @@ export default function DiscoveryPage() {
   const [refreshKey, setRefresh] = useState(0);
 
   const load = useCallback(async () => {
+    setError(null);
     try {
-      setError(null);
       const [net, h, a] = await Promise.all([
-        api.get<{ items: NetworkRow[] }>("/api/admin/v1/networks?limit=200"),
-        api.get<{ items: HostRow[] }>("/api/hosts?limit=200").catch(() => null),
-        api.get<{ items: AgentSummary[] }>("/api/admin/v1/agents?limit=200"),
+        api.get<unknown>("/api/admin/v1/networks?limit=200"),
+        api.get<{ items?: HostRow[] }>("/api/hosts?limit=200").catch(() => null),
+        api.get<{ items?: AgentSummary[] }>("/api/admin/v1/agents?limit=200"),
       ]);
-      setNetworks(net.items);
-      setHosts(h?.items ?? []);
-      setAgents(a.items);
+      const parsed = parseNetworksResponse(net); // throws on shape mismatch
+      setData({ observations: parsed.observations, scope: parsed.effective_scope });
+      setHosts(Array.isArray(h?.items) ? h!.items! : []);
+      setAgents(Array.isArray(a?.items) ? a!.items! : []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "خطای ناشناخته");
+      setError(
+        e instanceof ApiError ? e.detail
+        : e instanceof Error ? e.message
+        : "خطای ناشناخته",
+      );
     }
   }, []);
 
@@ -39,26 +60,58 @@ export default function DiscoveryPage() {
 
   const filteredHosts = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    if (!needle) return hosts ?? [];
-    return (hosts ?? []).filter((h) =>
-      (h.ip ?? "").includes(needle) || (h.hostname ?? "").toLowerCase().includes(needle) || (h.mac ?? "").includes(needle));
+    const list = hosts ?? [];
+    if (!needle) return list;
+    return list.filter((h) =>
+      (h.ip ?? "").includes(needle)
+      || (h.hostname ?? "").toLowerCase().includes(needle)
+      || (h.mac ?? "").toLowerCase().includes(needle));
   }, [hosts, q]);
 
-  /** Topology edges: an internet-style hub per subnet, agents attach via the
-   *  interface they reported; hosts hang off the subnet that contains them
-   *  (computation from real prefixes, never invented links). */
+  /** Aggregated subnets from agent observations (dedup by cidr, keep latest
+   *  seen + reporting agents) — pure frontend aggregation of real rows. */
+  const observedSubnets = useMemo(() => {
+    const byCidr = new Map<string, { cidr: string; agents: Set<string>; interfaces: Set<string>; last_seen: string; classification: string | null; connected: boolean }>();
+    for (const o of data?.observations ?? []) {
+      const cidr = (o.cidr ?? "").trim();
+      if (!cidr || !isValidCidr(cidr)) continue;
+      const cur = byCidr.get(cidr);
+      if (cur) {
+        cur.agents.add(o.agent_id);
+        cur.interfaces.add(o.interface);
+        if ((o.last_seen ?? "") > cur.last_seen) cur.last_seen = o.last_seen ?? "";
+        if (o.connected === 1) cur.connected = true;
+      } else {
+        byCidr.set(cidr, {
+          cidr,
+          agents: new Set([o.agent_id]),
+          interfaces: new Set([o.interface]),
+          last_seen: o.last_seen ?? "",
+          classification: o.classification ?? null,
+          connected: o.connected === 1,
+        });
+      }
+    }
+    return [...byCidr.values()].sort((a, b) => b.last_seen.localeCompare(a.last_seen));
+  }, [data]);
+
+  /** Hosts per subnet via real CIDR containment (IPv4 + IPv6). */
   const topology = useMemo(() => {
     const agentIps = new Set<string>();
-    (agents ?? []).forEach((a) => (a.claimed_ips ?? []).forEach((ip) => agentIps.add(ip)));
-    const nets = (networks ?? []).filter((n) => n.prefix).slice(0, 6);
-    return nets.map((n) => {
-      const prefix = String(n.prefix);
-      // crude containment: same /24 (IPv4) or /64 (IPv6) using string prefix
-      const base = prefix.split(".").slice(0, 3).join(".") ?? prefix.split(":").slice(0, 4).join(":");
-      const inSubnet = (filteredHosts ?? []).filter((h) => (h.ip ?? "").startsWith(base === prefix ? String(h.ip) : base));
-      return { net: n, hosts: inSubnet.slice(0, 8), extra: Math.max(0, inSubnet.length - 8) };
+    for (const a of agents ?? []) for (const ip of a.claimed_ips ?? []) agentIps.add(ip);
+    return observedSubnets.slice(0, 6).map((subnet) => {
+      const inside = filteredHosts.filter((h) => ipInCidr(h.ip, subnet.cidr));
+      return { subnet, hosts: inside.slice(0, 8), extra: Math.max(0, inside.length - 8) };
     });
-  }, [networks, filteredHosts]);
+  }, [observedSubnets, filteredHosts, agents]);
+
+  const authorizedSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const c of data?.scope.configured_cidrs ?? []) s.add(c);
+    for (const a of data?.scope.auto_discovered ?? []) s.add(a.cidr);
+    for (const t of data?.scope.authorized_targets ?? []) s.add(t);
+    return s;
+  }, [data]);
 
   return (
     <div>
@@ -66,10 +119,9 @@ export default function DiscoveryPage() {
         <div className="row wrap" style={{ gap: 12 }}>
           <IconWifi size={20} style={{ color: "var(--accent)" }} />
           <div>
-            <div style={{ fontWeight: 700 }}>شبکه‌های مشاهده‌شده توسط عامل‌ها</div>
+            <div style={{ fontWeight: 700 }}>کشف شبکه — مشاهده‌شده، پیکربندی‌شده، مجاز</div>
             <div className="small muted">
-              فقط چیزی که واقعاً از inventory عامل‌ها و کشف خودکار ثبت شده — عامل، منبع واقعی
-              داده است؛ نشان‌دادن بدون عامل هم فقط از آدرس‌های ثبت‌شده است.
+              این سه مفهوم عمداً جدا هستند: مشاهده‌شدن یک شبکه به معنای مجاز بودن اسکن آن نیست.
             </div>
           </div>
           <div className="spacer" />
@@ -79,25 +131,77 @@ export default function DiscoveryPage() {
 
       {error ? (
         <div className="card"><ErrorState message={error} onRetry={() => setRefresh((k) => k + 1)} /></div>
+      ) : !data ? (
+        <div className="card card-pad"><SkeletonRows rows={5} /></div>
       ) : (
         <>
-          <div className="grid-half">
-            <Card title="Subnetها و Gatewayها — منبع: گزارش عامل‌ها" pad={false}>
-              {networks === null ? <SkeletonRows rows={4} /> : networks.length === 0 ? (
-                <EmptyState title="شبکه‌ای ثبت نشده" hint="پس از inventory یا تسک network_configuration این‌جا می‌آید." />
+          {/* -- policy panel: Configured vs Authorized ------------------- */}
+          <div className="grid-half" style={{ marginBottom: 14 }}>
+            <Card title="محدوده‌ی پیکربندی‌شده (Configured)">
+              {(data.scope.configured_cidrs.length === 0 && data.scope.authorized_targets.length === 0) ? (
+                <EmptyState title="محدوده‌ای پیکربندی نشده"
+                  hint="MONITOR_CIDRS / AUTHORIZED_TARGETS در تنظیمات سرور تعیین می‌شود." />
+              ) : (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {data.scope.configured_cidrs.map((c) => (
+                    <span key={c} className="badge badge-accent"><span className="technical">{c}</span></span>
+                  ))}
+                  {data.scope.authorized_targets.map((t) => (
+                    <span key={t} className="badge badge-muted"><span className="technical">{t}</span></span>
+                  ))}
+                </div>
+              )}
+            </Card>
+            <Card title="مجاز برای کشف فعال (Authorized — سیاست)">
+              {!data.scope.auto_discovery_enabled && (data.scope.auto_discovered ?? []).length === 0 ? (
+                <EmptyState title="کشف خودکار غیرفعال است"
+                  hint="فقط محدوده‌ی پیکربندی‌شده برای اسکن فعال مجاز است." />
+              ) : (
+                <div>
+                  <div className="small" style={{ marginBottom: 8 }}>
+                    کشف خودکار: <b>{data.scope.auto_discovery_enabled ? "فعال" : "غیرفعال"}</b>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {(data.scope.auto_discovered ?? []).map((a) => (
+                      <span key={a.cidr} className="badge badge-ok" title={a.justification}>
+                        <span className="technical">{a.cidr}</span>
+                        <span className="small muted"> ({faNum(a.reporting_agents?.length ?? 0)} عامل)</span>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="small muted" style={{ marginTop: 8 }}>
+                    فقط شبکه‌های خصوصیِ مستقیماً متصل با گزارش‌گر کافی — عمومی/VPN/loopback هرگز خودکار مجاز نمی‌شوند.
+                  </div>
+                </div>
+              )}
+            </Card>
+          </div>
+
+          {/* -- observed subnets ----------------------------------------- */}
+          <div className="grid-half" style={{ marginBottom: 14 }}>
+            <Card title="شبکه‌های مشاهده‌شده توسط عامل‌ها (Observed)" pad={false}>
+              {observedSubnets.length === 0 ? (
+                <EmptyState title="شبکه‌ای ثبت نشده"
+                  hint="پس از inventory یا تسک network_configuration این‌جا می‌آید." />
               ) : (
                 <div className="table-wrap">
                   <table className="data">
                     <thead>
-                      <tr><th>Subnet</th><th>Gateway</th><th>تعداد میزبان</th><th>آخرین مشاهده</th></tr>
+                      <tr><th>Subnet</th><th>عامل گزارش‌ده</th><th>رابط</th><th>طبقه‌بندی</th><th>آخرین مشاهده</th><th>مجاز؟</th></tr>
                     </thead>
                     <tbody>
-                      {networks.map((n, i) => (
-                        <tr key={`${n.prefix}-${i}`}>
-                          <td><TechChip>{n.prefix}</TechChip></td>
-                          <td className="technical small">{n.gateway ?? "—"}</td>
-                          <td>{faNum(n.host_count ?? null)}</td>
-                          <td className="small muted">{fmtAgo(n.last_seen_at ?? null)}</td>
+                      {observedSubnets.map((n) => (
+                        <tr key={n.cidr}>
+                          <td><TechChip>{n.cidr}</TechChip></td>
+                          <td>{faNum(n.agents.size)}</td>
+                          <td className="small">{[...n.interfaces].join("، ")}</td>
+                          <td className="small muted">{n.classification ?? "—"}</td>
+                          <td className="small muted">{fmtAgo(n.last_seen)}</td>
+                          <td>
+                            {authorizedSet.has(n.cidr)
+                              ? <span className="badge badge-ok">مجاز</span>
+                              : <span className="badge badge-muted">فقط مشاهده</span>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -106,16 +210,16 @@ export default function DiscoveryPage() {
               )}
             </Card>
 
-            <Card title="توپولوژی مشاهده‌شده (لینک‌ها = داده واقعی)">
+            <Card title="توپولوژی مشاهده‌شده (لینک‌ها = داده‌ی واقعی)">
               {topology.length === 0 ? (
                 <EmptyState title="داده‌ای برای ترسیم نیست" />
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  {topology.map(({ net, hosts: hs, extra }) => (
-                    <div key={String(net.prefix)} className="card" style={{ padding: 12, background: "var(--bg-card-2)" }}>
+                  {topology.map(({ subnet, hosts: hs, extra }) => (
+                    <div key={subnet.cidr} className="card" style={{ padding: 12, background: "var(--bg-card-2)" }}>
                       <div className="row">
-                        <span className="badge badge-accent technical">{String(net.prefix)}</span>
-                        {net.gateway && <span className="small muted">GW <span className="technical">{String(net.gateway)}</span></span>}
+                        <span className="badge badge-accent technical">{subnet.cidr}</span>
+                        <span className="small muted">رابط: {[...subnet.interfaces].join("، ")}</span>
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
                         {hs.map((h) => {
@@ -130,8 +234,7 @@ export default function DiscoveryPage() {
                         {extra > 0 && <span className="badge badge-muted">+{faNum(extra)}</span>}
                       </div>
                       <div className="small muted" style={{ marginTop: 8 }}>
-                        سبز: عامل فعال این رابط را گزارش کرده. خاکستری: میزبانِ شناسایی‌شده بدون عامل —
-                        نقطه‌ی احتمالی نصب عامل.
+                        میزبان‌ها با تطبیق CIDR واقعی (IPv4/IPv6) پیدا شده‌اند؛ سبز = عامل فعال، خاکستری = بدون عامل.
                       </div>
                     </div>
                   ))}
@@ -140,16 +243,17 @@ export default function DiscoveryPage() {
             </Card>
           </div>
 
+          {/* -- hosts ------------------------------------------------------ */}
           <Card pad={false} title="میزبان‌های شناسایی‌شده" extra={
             <input className="input" style={{ width: 220 }} placeholder="جست‌وجوی IP/MAC/نام…" value={q} onChange={(e) => setQ(e.target.value)} />
           }>
             {hosts === null ? <SkeletonRows rows={5} /> : filteredHosts.length === 0 ? (
-              <EmptyState title="میزبانی ثبت نشده" hint="کشف شبکه (nmap / arp-scan) فقط روی محدوده‌ی مجاز پیکربندی انجام می‌شود." />
+              <EmptyState title="میزبانی ثبت نشده" hint="کشف شبکه فقط روی محدوده‌ی مجاز انجام می‌شود." />
             ) : (
               <div className="table-wrap">
                 <table className="data">
                   <thead>
-                    <tr><th>IP</th><th>Hostname</th><th>MAC</th><th>اولین مشاهده</th><th>آخرین مشاهده</th><th>عامل ندارد؟</th></tr>
+                    <tr><th>IP</th><th>Hostname</th><th>MAC</th><th>اولین مشاهده</th><th>آخرین مشاهده</th><th>پوشش عامل</th></tr>
                   </thead>
                   <tbody>
                     {filteredHosts.slice(0, 100).map((h) => {
@@ -164,7 +268,7 @@ export default function DiscoveryPage() {
                           <td>
                             {isAgent
                               ? <span className="badge badge-ok"><span className="dot pulse" />در پوشش عامل</span>
-                              : h.first_seen ? <span className="badge badge-warn">بدون عامل</span> : <span className="small muted">—</span>}
+                              : <span className="badge badge-warn">بدون عامل</span>}
                           </td>
                         </tr>
                       );

@@ -154,6 +154,33 @@ export interface NetworkObservation {
   [k: string]: unknown;
 }
 
+/** Exactly what `GET /api/admin/v1/networks` returns (admin_routes.py). */
+export interface NetworkObservationRow {
+  id: number;
+  agent_id: string;
+  interface: string;
+  cidr: string;
+  classification: string | null;
+  connected: number;
+  source: string;
+  first_seen: string;
+  last_seen: string;
+}
+
+export interface EffectiveDiscoveryScope {
+  configured_cidrs: string[];
+  authorized_targets: string[];
+  auto_discovered: { cidr: string; reporting_agents: string[]; justification: string }[];
+  auto_discovery_enabled: boolean;
+  note?: string;
+}
+
+export interface NetworksResponse {
+  observations: NetworkObservationRow[];
+  effective_scope: EffectiveDiscoveryScope;
+}
+
+/** Kept name for host-aggregation views (rows of GET /api/hosts). */
 export interface NetworkRow {
   prefix: string;
   gateway?: string | null;

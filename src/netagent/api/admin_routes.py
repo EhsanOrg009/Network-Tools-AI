@@ -499,6 +499,164 @@ def reanalyze_alert(
 
 
 # ---------------------------------------------------------------------------
+# AI Activity Monitor (v8): observable lifecycle of every real LLM request
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/ai-activity/summary",
+    tags=["پایش فعالیت هوش مصنوعی"],
+    summary="وضعیت تجمیعی فعالیت مدل محلی",
+    description=(
+        "آمار واقعی درخواست‌های LLM: تعداد رکوردها بر اساس وضعیت "
+        "(`RUNNING`/`COMPLETED`/`FAILED`/`TIMEOUT`)، میانگین زمان پاسخ، آخرین "
+        "فعالیت، خطاهای اخیر و وضعیت صف تحلیل. همه‌ی مقادیر از رکوردهای واقعی "
+        "می‌آیند؛ هیچ شمارنده‌ی ساختگی و انیمیشن فعال‌کننده وجود ندارد."
+    ),
+    responses=_responses(
+        "خلاصه‌ی فعالیت مدل.",
+        {
+            "counts": {"COMPLETED": 12, "FAILED": 2},
+            "avg_duration_ms": 4120.5,
+            "last_final_at": "2026-11-06T09:30:00+00:00",
+            "last_created_at": "2026-11-06T09:29:41+00:00",
+            "last_error": {"error": "LLMUnavailable: LLM request failed: APITimeoutError", "final_at": "..."},
+            "recent_errors": [
+                {"error": "LLMUnavailable: ...", "final_at": "2026-11-06T09:10:02+00:00"}
+            ],
+            "queue": {"alert_analysis_pending_and_running": 3},
+            "model": "gemma-4-e2b-it-q4_0--2-:latest",
+            "llm_enabled": True,
+        },
+    ),
+)
+def ai_activity_summary(
+    request: Request,
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض)."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description="برچسب اختیاری مدیر برای حسابرسی، مثال: `admin-ops`.",
+    ),
+) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    summary = db.ai_activity_summary()
+    summary["queue"] = {
+        "alert_analysis_pending_and_running": db.pending_alert_analysis_count(),
+    }
+    summary["model"] = settings.msty_model if settings.llm_enabled else None
+    summary["llm_enabled"] = settings.llm_enabled
+    return summary
+
+
+@router.get(
+    "/ai-activity",
+    tags=["پایش فعالیت هوش مصنوعی"],
+    summary="فهرست رکوردهای فعالیت مدل",
+    description=(
+        "یک رکورد به‌ازای هر درخواست/کار LLM — تحلیل هشدار (تکی یا گروهی) یا "
+        "بررسی هوشمند. برای هر رکورد: شناسه درخواست، نوع کار، ارجاع‌های مرتبط "
+        "(`refs`)، مدل، نسخه پرامپت، وضعیت، زمان‌ها (ایجاد، ارسال، اولین توکن، "
+        "پاسخ)، مدت، خلاصه‌ی خروجی و خطا. مراحل ساختگی نمایش داده نمی‌شوند؛ "
+        "فقط مسیرِ واقعیِ انجام‌شده."
+    ),
+    responses=_responses(
+        "فهرست رکوردهای فعالیت به ترتیب زمان.",
+        {
+            "items": [{
+                "request_id": "act_3f6a9c2b",
+                "task_type": "alert_analysis",
+                "status": "COMPLETED",
+                "duration_ms": 4120.5,
+                "model": "gemma-4-e2b-it-q4_0--2-:latest",
+                "created_at": "2026-11-06T09:29:41+00:00",
+            }],
+            "total": 184,
+        },
+    ),
+)
+def list_ai_activity(
+    request: Request,
+    task_type: str | None = Query(
+        None, description="فیلتر نوع کار: alert_analysis یا alert_analysis_batch یا investigation."
+    ),
+    status: str | None = Query(
+        None, description="فیلتر وضعیت: RUNNING یا COMPLETED یا FAILED یا TIMEOUT."
+    ),
+    limit: int = Query(100, ge=1, le=500, description="حداکثر تعداد رکورد."),
+    offset: int = Query(0, ge=0, description="شیفت صفحه‌بندی."),
+    authorization: str | None = Header(
+        default=None,
+        description=(
+            "هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. "
+            "توکن مدیر از متغیر محیطی `ADMIN_API_TOKEN` می‌آید (بدون مقدار پیش‌فرض)."
+        ),
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description="برچسب اختیاری مدیر برای حسابرسی، مثال: `admin-ops`.",
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    items, total = db.list_ai_activity(
+        task_type=task_type, status=status, limit=limit, offset=offset
+    )
+    return {"items": items, "total": total}
+
+
+@router.get(
+    "/ai-activity/{request_id}",
+    tags=["پایش فعالیت هوش مصنوعی"],
+    summary="جزئیات و خط زمانی یک درخواست",
+    description=(
+        "خط زمانی کامل (و فقط خط زمانی واقعی) یک درخواست: مرحله، زمان و "
+        "بلوک ابزارها. در صفحه‌ی AI Activity برای باز کردن جزئیات استفاده می‌شود."
+    ),
+    responses=_responses(
+        "رکورد کامل فعالیت.",
+        {
+            "request_id": "act_3f6a9c2b",
+            "task_type": "alert_analysis_batch",
+            "status": "COMPLETED",
+            "timeline": [
+                {"stage": "REQUEST_CREATED", "at": "2026-11-06T09:29:41+00:00"},
+                {"stage": "SENT_TO_LLM", "at": "2026-11-06T09:29:41+00:00"},
+                {"stage": "FIRST_TOKEN_RECEIVED", "at": "2026-11-06T09:29:52+00:00"},
+                {"stage": "RESPONSE_RECEIVED", "at": "2026-11-06T09:29:58+00:00"},
+                {"stage": "PERSISTED", "at": "2026-11-06T09:29:58+00:00"},
+            ],
+        },
+        not_found="درخواستی با این شناسه وجود ندارد (ممکن است حذف شده باشد).",
+    ),
+)
+def get_ai_activity(
+    request: Request,
+    request_id: str = Path(description="شناسه‌ی درخواست.", examples=["act_3f6a9c2b"]),
+    authorization: str | None = Header(
+        default=None,
+        description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`. توکن مدیر اجباری است.",
+    ),
+    x_admin_actor: str | None = Header(
+        default=None,
+        description="برچسب اختیاری مدیر برای حسابرسی، مثال: `admin-ops`.",
+    ),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    row = db.get_ai_activity(request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="درخواستی با این شناسه یافت نشد.")
+    return row
+
+
+# ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
 

@@ -15,6 +15,7 @@ import AgentDetailPage from "./pages/AgentDetail";
 import DiscoveryPage from "./pages/Discovery";
 import SecurityPage from "./pages/Security";
 import InvestigationsPage from "./pages/Investigations";
+import AIActivityPage from "./pages/AIActivity";
 import SettingsPage from "./pages/SettingsPage";
 
 const NAV = [
@@ -24,6 +25,7 @@ const NAV = [
   { to: "/dashboard/discovery", label: "کشف شبکه", icon: IconWifi },
   { to: "/dashboard/security", label: "مرکز امنیت", icon: IconShield },
   { to: "/dashboard/investigations", label: "بررسی‌های هوشمند", icon: IconBrain },
+  { to: "/dashboard/ai-activity", label: "فعالیت هوش مصنوعی", icon: IconBrain },
   { to: "/dashboard/settings", label: "تنظیمات", icon: IconGear },
 ];
 
@@ -144,6 +146,7 @@ function ShellInner() {
             <Route path="/dashboard/discovery" element={<DiscoveryPage />} />
             <Route path="/dashboard/security" element={<SecurityPage />} />
             <Route path="/dashboard/investigations" element={<InvestigationsPage />} />
+            <Route path="/dashboard/ai-activity" element={<AIActivityPage />} />
             <Route path="/dashboard/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>

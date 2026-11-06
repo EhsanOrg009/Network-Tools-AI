@@ -31,6 +31,7 @@ from netagent.agent.llm_client import LLMClient, LLMUnavailable
 from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import AlertAnalysis
+from netagent.services.ai_activity import ActivityTrace, traced_chat
 
 log = logging.getLogger("netagent.ai_analysis")
 
@@ -201,8 +202,18 @@ class AlertAnalysisWorker:
             self.db.fail_alert_analysis(row["alert_id"], error="alert vanished from database")
             return
         alert.pop("raw_json", None)
+        trace = ActivityTrace(
+            self.db, task_type="alert_analysis", model=self.llm.model,
+            refs=[{"alert_id": row["alert_id"], "severity": alert.get("severity")}],
+            prompt_version=PROMPT_VERSION,
+            context_summary=ActivityTrace.context_digest({
+                k: alert.get(k) for k in _ALERT_FIELDS
+            }),
+        )
         try:
-            text = self.llm.chat(build_analysis_messages(alert))
+            text = traced_chat(
+                self.llm, build_analysis_messages(alert), trace=trace
+            )
             data = LLMClient.extract_json(text)
             if data is None or not any(k in (data or {}) for k in ("summary", "importance")):
                 raise ValueError("model output was not valid JSON")
@@ -214,15 +225,18 @@ class AlertAnalysisWorker:
                 prompt_version=PROMPT_VERSION,
                 duration_ms=self._duration_ms(row),
             )
+            trace.mark("PERSISTED")
+            trace.complete(outcome_summary=f"{analysis.importance}: {analysis.summary}")
             self._failure_streak = 0
         except LLMUnavailable as exc:
-            self.db.fail_alert_analysis(
-                row["alert_id"], error=f"{exc.__class__.__name__}: {exc}"
-            )
+            error = f"{exc.__class__.__name__}: {exc}"
+            self.db.fail_alert_analysis(row["alert_id"], error=error)
+            trace.fail(error, timeout="timeout" in error.lower())
         except Exception as exc:  # store precise failure; row becomes FAILED
             self.db.fail_alert_analysis(
                 row["alert_id"], error=f"{exc.__class__.__name__}: {exc}"
             )
+            trace.fail(f"{exc.__class__.__name__}: {exc}")
 
     def process_one(self) -> bool:
         """Claim one batch (coherent group) and analyze it. Returns True when
@@ -265,8 +279,20 @@ class AlertAnalysisWorker:
             self._analyze_single(rows_by_id[alerts[0]["id"]])
             return True
 
+        trace = ActivityTrace(
+            self.db, task_type="alert_analysis_batch", model=self.llm.model,
+            refs=[{"alert_id": a["id"]} for a in alerts],
+            prompt_version=BATCH_PROMPT_VERSION,
+            context_summary=ActivityTrace.context_digest({
+                k: a.get(k) for a in alerts for k in ("src_ip", "signature_id")
+            }),
+        )
+        trace.mark("CONTEXT_PREPARED")
+
         try:
-            text = self.llm.chat(build_batch_analysis_messages(alerts))
+            text = traced_chat(
+                self.llm, build_batch_analysis_messages(alerts), trace=trace
+            )
             data = LLMClient.extract_json(text) or {}
             results = data.get("results")
             if not isinstance(results, list):
@@ -295,11 +321,15 @@ class AlertAnalysisWorker:
                 )
                 done_ids.add(alert_id)
             self._failure_streak = 0
+            trace.complete(outcome_summary=(
+                f"تحلیل گروهی: {len(done_ids)} نتیجه مستقل از {len(alerts)} "
+                f"هشدار؛ {len(rows_by_id) - len(done_ids)} مورد به تکی ارجاع شد."
+            ))
         except LLMUnavailable as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
             for alert_id in rows_by_id:
-                self.db.fail_alert_analysis(
-                    alert_id, error=f"{exc.__class__.__name__}: {exc}"
-                )
+                self.db.fail_alert_analysis(alert_id, error=error)
+            trace.fail(error, timeout="timeout" in error.lower())
             self._failure_streak += 1
             return True
         except Exception as exc:
@@ -310,17 +340,26 @@ class AlertAnalysisWorker:
                 # shape) → analyze every group member individually instead
                 for alert_id in sorted(rows_by_id):
                     self._analyze_single(rows_by_id[alert_id])
+                trace.complete(outcome_summary=(
+                    "دنباله‌ی گروهی نامعتبر بود؛ همه‌ی اعضا به‌صورت تکی تحلیل شدند."
+                ))
                 self._batch_consecutive_failures = 0
                 return True
+            error = f"{exc.__class__.__name__}: {exc}"
             for alert_id in rows_by_id:
-                self.db.fail_alert_analysis(
-                    alert_id, error=f"{exc.__class__.__name__}: {exc}"
-                )
+                self.db.fail_alert_analysis(alert_id, error=error)
+            trace.fail(error)
             return True
         # uncovered alerts get their own single analysis — nothing is dropped
+        left_open = False
         for alert_id in sorted(rows_by_id):
             if alert_id not in done_ids:
                 self._analyze_single(rows_by_id[alert_id])
+                left_open = True
+        if left_open:
+            trace.complete(outcome_summary=(
+                f"تحلیل گروهی: {len(done_ids)} نتیجه مستقل؛ بقیه تک‌به‌تک تحلیل شدند."
+            ))
         return True
 
     # -- loop ---------------------------------------------------------------------

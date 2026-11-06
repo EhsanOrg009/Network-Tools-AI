@@ -24,6 +24,12 @@ class LLMContextTooLong(RuntimeError):
     """The prompt exceeded the model context; caller should trim and retry."""
 
 
+class LLMStreamEmpty(RuntimeError):
+    """The stream completed without any content delta (e.g. a reasoning-only
+    model emitting nothing in ``delta.content``); callers may fall back to the
+    non-streaming call."""
+
+
 _CONTEXT_MARKERS = (
     "context length",
     "maximum context",
@@ -89,6 +95,63 @@ class LLMClient:
         if not content:
             raise LLMUnavailable("LLM returned an empty response")
         return content
+
+    # -- streaming ------------------------------------------------------------
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
+        *,
+        first_token_cb=None,
+    ) -> str:
+        """Chat completion with real streaming; the full text is returned so
+        callers keep the same contract as :meth:`chat`, but timing milestones
+        become observable (first token, in-flight generation).
+
+        ``first_token_cb`` is invoked exactly once, when the first *actual
+        content* delta arrives. Raises :class:`LLMStreamEmpty` when the stream
+        finished without any content delta, so callers can fall back to the
+        plain non-streaming path (e.g. reasoning-only models).
+        """
+        s = self._settings
+        try:
+            stream = self._client.chat.completions.create(
+                model=s.msty_model,
+                messages=messages,
+                temperature=s.llm_temperature,
+                max_tokens=max_tokens or s.llm_max_output_tokens,
+                stream=True,
+            )
+        except (APITimeoutError, APIConnectionError) as exc:
+            raise LLMUnavailable(f"LLM request failed: {exc.__class__.__name__}") from exc
+        except Exception as exc:
+            message = str(exc).lower()
+            if any(marker in message for marker in _CONTEXT_MARKERS):
+                raise LLMContextTooLong(str(exc)[:300]) from exc
+            raise LLMUnavailable(f"LLM error: {exc.__class__.__name__}: {str(exc)[:200]}") from exc
+
+        parts: list[str] = []
+        first_token_logged = False
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                content = getattr(delta, "content", None)
+                if isinstance(content, str) and content:
+                    if first_token_cb is not None and not first_token_logged:
+                        first_token_logged = True
+                        first_token_cb()
+                    parts.append(content)
+        except (APITimeoutError, APIConnectionError) as exc:
+            raise LLMUnavailable(f"LLM stream failed: {exc.__class__.__name__}") from exc
+
+        text = "".join(parts)
+        if not text.strip():
+            raise LLMStreamEmpty("stream completed without content deltas")
+        return text
 
     # -- JSON extraction ------------------------------------------------------
 

@@ -330,6 +330,31 @@ CREATE TABLE IF NOT EXISTS agent_traffic_samples (
     connections_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_traffic_agent ON agent_traffic_samples(agent_id, epoch);
+
+CREATE TABLE IF NOT EXISTS ai_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL UNIQUE,
+    task_type TEXT NOT NULL,
+    ref_json TEXT,
+    model TEXT,
+    prompt_version TEXT,
+    status TEXT NOT NULL DEFAULT 'RUNNING',
+    context_summary TEXT,
+    timeline_json TEXT,
+    tool_calls_json TEXT,
+    outcome_summary TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    created_epoch REAL NOT NULL,
+    sent_at TEXT,
+    first_token_at TEXT,
+    first_token_ms REAL,
+    final_at TEXT,
+    duration_ms REAL,
+    streaming INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_aiactivity_epoch ON ai_activity(created_epoch);
+CREATE INDEX IF NOT EXISTS idx_aiactivity_status ON ai_activity(status, created_epoch);
 """
 
 
@@ -2208,6 +2233,248 @@ class Database:
                 "SELECT COUNT(*) AS c FROM alert_analyses WHERE status IN ('PENDING', 'PROCESSING')"
             ).fetchone()
         return int(row["c"])
+
+    # =========================================================================
+    # AI activity trace (v8): observable lifecycle of every LLM request
+    # =========================================================================
+
+    AI_ACTIVITY_STAGES = (
+        "REQUEST_CREATED", "QUEUED", "CONTEXT_PREPARED", "SENT_TO_LLM",
+        "FIRST_TOKEN_RECEIVED", "GENERATING", "TOOL_REQUESTED",
+        "TOOL_COMPLETED", "RESPONSE_RECEIVED", "PERSISTED",
+    )
+
+    def create_ai_activity(
+        self, *, request_id: str, task_type: str, refs: list[dict[str, Any]] | None,
+        model: str | None, prompt_version: str | None,
+        context_summary: str | None = None,
+    ) -> str:
+        """Create an activity row in RUNNING state. Only *real* milestones are
+        ever added to the timeline — nothing is pre-filled."""
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO ai_activity(
+                    request_id, task_type, ref_json, model, prompt_version,
+                    status, context_summary, timeline_json, created_at, created_epoch
+                ) VALUES(?,?,?,?,?, 'RUNNING', ?, ?, ?, ?)
+                """,
+                (
+                    request_id, task_type,
+                    json.dumps(refs or [], ensure_ascii=False, default=str),
+                    model, prompt_version,
+                    (context_summary or None),
+                    json.dumps(
+                        [{"stage": "REQUEST_CREATED", "at": now}],
+                        ensure_ascii=False,
+                    ),
+                    now,
+                    datetime.now(timezone.utc).timestamp(),
+                ),
+            )
+            self._conn.commit()
+        self.prune_ai_activity()
+        return request_id
+
+    def stage_ai_activity(
+        self, request_id: str, stage: str, *,
+        context_summary: str | None = None,
+        first_token_ms: float | None = None,
+        streaming: bool | None = None,
+    ) -> None:
+        """Append a *real* milestone to the timeline (idempotent-safe)."""
+        if stage not in self.AI_ACTIVITY_STAGES:
+            raise ValueError(f"unknown activity stage: {stage}")
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT timeline_json FROM ai_activity WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return
+            try:
+                timeline = json.loads(row["timeline_json"] or "[]")
+            except (TypeError, ValueError):
+                timeline = []
+            entry: dict[str, Any] = {"stage": stage, "at": now}
+            if stage == "SENT_TO_LLM":
+                self._conn.execute(
+                    "UPDATE ai_activity SET sent_at = ? WHERE request_id = ?",
+                    (now, request_id),
+                )
+            elif stage == "FIRST_TOKEN_RECEIVED":
+                self._conn.execute(
+                    """
+                    UPDATE ai_activity SET
+                        first_token_at = ?,
+                        first_token_ms = COALESCE(?, first_token_ms),
+                        streaming = COALESCE(?, streaming)
+                    WHERE request_id = ?
+                    """,
+                    (now, first_token_ms,
+                     None if streaming is None else int(streaming), request_id),
+                )
+            if context_summary:
+                self._conn.execute(
+                    "UPDATE ai_activity SET context_summary = ? WHERE request_id = ?",
+                    (context_summary[:2000], request_id),
+                )
+            timeline.append(entry)
+            self._conn.execute(
+                "UPDATE ai_activity SET timeline_json = ? WHERE request_id = ?",
+                (json.dumps(timeline, ensure_ascii=False), request_id),
+            )
+            self._conn.commit()
+
+    def finish_ai_activity(
+        self, request_id: str, *, outcome_summary: str | None = None,
+        error: str | None = None, status: str = "COMPLETED",
+    ) -> None:
+        """Close an activity row. ``status`` is COMPLETED / FAILED / TIMEOUT.
+
+        Total duration is measured between created_at and final_at. On
+        completion RESPONSE_RECEIVED + PERSISTED are recorded; a FAILED row
+        keeps precisely the stages that actually happened.
+        """
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT created_epoch, timeline_json FROM ai_activity WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return
+            duration_ms = max(
+                0.0,
+                (datetime.now(timezone.utc).timestamp() - float(row["created_epoch"])) * 1000.0,
+            )
+            try:
+                timeline = json.loads(row["timeline_json"] or "[]")
+            except (TypeError, ValueError):
+                timeline = []
+            if status == "COMPLETED":
+                stages = {e.get("stage") for e in timeline if isinstance(e, dict)}
+                for stage in ("RESPONSE_RECEIVED", "PERSISTED"):
+                    if stage not in stages:
+                        timeline.append({"stage": stage, "at": now})
+            self._conn.execute(
+                """
+                UPDATE ai_activity SET status = ?, final_at = ?, error = ?,
+                       duration_ms = ?, outcome_summary = ?, timeline_json = ?
+                WHERE request_id = ?
+                """,
+                (
+                    status, now, (error[:500] if error else None), duration_ms,
+                    (outcome_summary[:4000] if outcome_summary else None),
+                    json.dumps(timeline, ensure_ascii=False),
+                    request_id,
+                ),
+            )
+            self._conn.commit()
+
+    @staticmethod
+    def _activity_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        for col, key in ("ref_json", "refs"), ("timeline_json", "timeline"), (
+            "tool_calls_json", "tool_calls"
+        ):
+            if d.get(col):
+                try:
+                    d[key] = json.loads(d[col])
+                except (TypeError, ValueError):
+                    pass
+            d.pop(col, None)
+        return d
+
+    def get_ai_activity(self, request_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ai_activity WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        return self._activity_row_to_dict(row) if row else None
+
+    def list_ai_activity(
+        self, *, task_type: str | None = None, status: str | None = None,
+        limit: int = 100, offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        where: list[str] = []
+        params: list[Any] = []
+        if task_type:
+            where.append("task_type = ?")
+            params.append(task_type)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS c FROM ai_activity {cond}", params
+            ).fetchone()["c"]
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM ai_activity {cond}
+                ORDER BY created_epoch DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+        return [self._activity_row_to_dict(r) for r in rows], int(total)
+
+    def ai_activity_summary(self, *, running_ids: list[str] | None = None) -> dict[str, Any]:
+        """Aggregated real activity (no synthetic counters anywhere)."""
+        with self._lock:
+            counts = {
+                r["status"]: r["c"] for r in self._conn.execute(
+                    "SELECT status, COUNT(*) AS c FROM ai_activity GROUP BY status"
+                )
+            }
+            avg = self._conn.execute(
+                """
+                SELECT AVG(duration_ms) AS a, MAX(final_at) AS last_final_at,
+                       MAX(created_at) AS last_created_at
+                FROM ai_activity WHERE status IN ('COMPLETED', 'TIMEOUT')
+                """
+            ).fetchone()
+            last_error = self._conn.execute(
+                """
+                SELECT error, final_at FROM ai_activity
+                WHERE status IN ('FAILED', 'TIMEOUT')
+                ORDER BY created_epoch DESC LIMIT 1
+                """
+            ).fetchone()
+            recent_errors = [
+                {"error": r["error"], "final_at": r["final_at"]}
+                for r in self._conn.execute(
+                    """
+                    SELECT error, final_at FROM ai_activity
+                    WHERE status IN ('FAILED', 'TIMEOUT')
+                    ORDER BY created_epoch DESC LIMIT 5
+                    """
+                ).fetchall()
+            ]
+        return {
+            "counts": counts,
+            "running": running_ids or [],
+            "avg_duration_ms": round(float(avg["a"]), 1) if avg["a"] is not None else None,
+            "last_final_at": avg["last_final_at"],
+            "last_created_at": avg["last_created_at"],
+            "last_error": dict(last_error) if last_error else None,
+            "recent_errors": recent_errors,
+        }
+
+    def prune_ai_activity(self, keep: int = 1000) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                DELETE FROM ai_activity WHERE id NOT IN (
+                    SELECT id FROM ai_activity ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (keep,),
+            )
+            self._conn.commit()
+        return cur.rowcount
 
     # =========================================================================
     # Endpoint traffic monitoring (v6): per-interface counters + connections

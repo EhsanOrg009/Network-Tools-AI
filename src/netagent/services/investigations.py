@@ -11,6 +11,7 @@ from netagent.agent.orchestrator import Orchestrator
 from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import AgentReport
+from netagent.services.ai_activity import ActivityTrace
 from netagent.services.reporting import (
     fill_missing_sections,
     normalize_llm_report,
@@ -39,8 +40,27 @@ def run_investigation(
 
     inv_id = db.create_investigation(trigger, target_ip, question, evidence)
     started = time.monotonic()
+    trace = (
+        ActivityTrace(
+            db,
+            task_type="investigation",
+            model=getattr(llm, "model", None) if llm is not None else None,
+            refs=[
+                {"investigation_id": inv_id},
+                *( [{"target_ip": target_ip}] if target_ip else [] ),
+                *( [{"alert_id": alert_id}] if alert_id else [] ),
+            ],
+            context_summary=ActivityTrace.context_digest({
+                "trigger": trigger,
+                "question": question,
+                "evidence_keys": sorted(evidence.keys()),
+            }),
+        ) if llm is not None else None
+    )
+    if trace is not None:
+        trace.mark("CONTEXT_PREPARED")
     try:
-        report_raw, meta = orch.run(evidence, question=question)
+        report_raw, meta = orch.run(evidence, question=question, trace=trace)
         report = (
             report_raw if isinstance(report_raw, AgentReport)
             else normalize_llm_report(report_raw)
@@ -51,6 +71,8 @@ def run_investigation(
         error = meta.get("llm_error")
         if error:
             status = "completed_fallback"
+            if trace is not None:
+                trace.fail(str(error))
         db.finish_investigation(
             inv_id,
             status=status,
@@ -60,6 +82,12 @@ def run_investigation(
             iterations=len(meta.get("tool_calls", [])),
             error=error,
         )
+        if error is None and trace is not None:
+            trace.mark("PERSISTED")
+            trace.complete(outcome_summary=(
+                f"بررسی {inv_id}: {len(meta.get('tool_calls', []))} فراخوانی ابزار، "
+                f"گزارش نهایی ذخیره شد؛ اطمینان: {report.confidence.level}."
+            ))
     except Exception as exc:  # keep the app alive; record precise failure
         db.finish_investigation(
             inv_id,
@@ -70,6 +98,8 @@ def run_investigation(
             iterations=0,
             error=f"{exc.__class__.__name__}: {exc}"[:300],
         )
+        if trace is not None:
+            trace.fail(f"{exc.__class__.__name__}: {exc}")
         raise
 
     record = db.get_investigation(inv_id) or {}

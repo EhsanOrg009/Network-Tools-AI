@@ -197,8 +197,14 @@ class Orchestrator:
         self,
         evidence: dict[str, Any],
         question: str | None = None,
+        trace: Any = None,
     ) -> tuple[AgentReport, dict[str, Any]]:
-        """Run the autonomous loop. Returns (report, meta)."""
+        """Run the autonomous loop. Returns (report, meta).
+
+        ``trace`` (optional, an ``ActivityTrace``) receives *real* milestones:
+        one SENT_TO_LLM / RESPONSE_RECEIVED pair per loop round, plus
+        TOOL_REQUESTED / TOOL_COMPLETED entries — never synthetic stages.
+        """
         meta: dict[str, Any] = {
             "tool_calls": [],
             "tool_calls_count": 0,
@@ -255,7 +261,11 @@ class Orchestrator:
             if not _time_left():
                 break
             try:
+                if trace is not None:
+                    trace.sent()
                 text = self._chat_trimmed(messages)
+                if trace is not None:
+                    trace.mark("RESPONSE_RECEIVED")
             except LLMUnavailable as exc:
                 meta["llm_error"] = str(exc)
                 return (
@@ -301,10 +311,14 @@ class Orchestrator:
                 })
                 continue
 
+            if trace is not None:
+                trace.mark("TOOL_REQUESTED")
             result = execute_tool(
                 self.registry, self.db, self.settings,
                 decision.tool, decision.args, scope,
             )
+            if trace is not None:
+                trace.mark("TOOL_COMPLETED")
             seen_calls[call_key] = seen_calls.get(call_key, 0) + 1
             meta["tool_calls"].append({"tool": decision.tool, "ok": result.get("ok")})
             meta["tool_calls_count"] = len(meta["tool_calls"])

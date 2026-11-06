@@ -307,9 +307,14 @@ CREATE TABLE IF NOT EXISTS alert_analyses (
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    analyzed_at TEXT
+    analyzed_at TEXT,
+    priority INTEGER NOT NULL DEFAULT 5,
+    batch_id TEXT,
+    started_at TEXT,
+    duration_ms REAL
 );
 CREATE INDEX IF NOT EXISTS idx_alertanal_status ON alert_analyses(status, alert_id);
+CREATE INDEX IF NOT EXISTS idx_alertanal_prio ON alert_analyses(status, priority, alert_id);
 
 CREATE TABLE IF NOT EXISTS agent_traffic_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,6 +331,20 @@ CREATE TABLE IF NOT EXISTS agent_traffic_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_traffic_agent ON agent_traffic_samples(agent_id, epoch);
 """
+
+
+# Additive, non-destructive migrations for databases created by older
+# versions. Each statement is an ALTER TABLE ... ADD COLUMN; duplicate-column
+# errors ("no such: ... duplicate") are expected and ignored. No existing
+# row or schema object is ever rewritten or deleted.
+_ADDITIVE_MIGRATIONS = (
+    # v7: prioritized / batched AI alert-analysis queue
+    "ALTER TABLE alert_analyses ADD COLUMN priority INTEGER NOT NULL DEFAULT 5",
+    "ALTER TABLE alert_analyses ADD COLUMN batch_id TEXT",
+    "ALTER TABLE alert_analyses ADD COLUMN started_at TEXT",
+    "ALTER TABLE alert_analyses ADD COLUMN duration_ms REAL",
+    "CREATE INDEX IF NOT EXISTS idx_alertanal_prio ON alert_analyses(status, priority, alert_id)",
+)
 
 
 def _now_iso() -> str:
@@ -345,7 +364,19 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
+            self._apply_additive_migrations()
             self._conn.commit()
+
+    def _apply_additive_migrations(self) -> None:
+        for statement in _ADDITIVE_MIGRATIONS:
+            try:
+                self._conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                # a repeated migration (column/index already present) is fine;
+                # anything else must be loud, not silently swallowed
+                if "duplicate column" in str(exc).lower() or "already exists" in str(exc).lower():
+                    continue
+                raise
 
     def close(self) -> None:
         with self._lock:
@@ -1896,48 +1927,179 @@ class Database:
     # AI alert analyses (v5): background LLM analysis of security alerts
     # =========================================================================
 
-    def enqueue_alert_analysis(self, *, alert_id: int, fingerprint: str) -> bool:
+    def enqueue_alert_analysis(
+        self, *, alert_id: int, fingerprint: str, priority: int = 5
+    ) -> bool:
         """Insert a PENDING analysis row; False when it already exists."""
         with self._lock:
             cur = self._conn.execute(
                 """
-                INSERT OR IGNORE INTO alert_analyses(alert_id, fingerprint, status, created_at)
-                VALUES(?, ?, 'PENDING', ?)
+                INSERT OR IGNORE INTO alert_analyses(
+                    alert_id, fingerprint, status, priority, created_at
+                ) VALUES(?, ?, 'PENDING', ?, ?)
                 """,
-                (alert_id, fingerprint, _now_iso()),
+                (alert_id, fingerprint, priority, _now_iso()),
             )
             self._conn.commit()
         return cur.rowcount > 0
 
-    def claim_next_alert_analysis(
-        self, *, max_attempts: int = 3, now_epoch: float | None = None
-    ) -> dict[str, Any] | None:
-        """Atomically claim one retryable row (oldest first) as PROCESSING.
+    @staticmethod
+    def _analysis_effective_order(
+        priority: int, created_at: str | None, now_epoch: float,
+        starvation_minutes: float,
+    ) -> float:
+        """Anti-starvation ordering key for queued analyses.
 
-        FAILED rows are retryable until ``max_attempts`` is exhausted.
+        Lower is claimed sooner. Every full ``starvation_minutes`` of waiting
+        improves (reduces) one row's effective priority by up to 4 levels, so
+        low-severity events still get processed even when critical events
+        arrive continuously — while fresh critical events always win.
+        """
+        boost = 0
+        if created_at:
+            try:
+                created = datetime.fromisoformat(created_at)
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age_minutes = max(0.0, (now_epoch - created.timestamp()) / 60.0)
+                boost = min(4, int(age_minutes / max(1.0, starvation_minutes)))
+            except (TypeError, ValueError):
+                boost = 0
+        return max(0, priority - boost)
+
+    def _analysis_candidates(
+        self, max_attempts: int, steal_limit: int = 50
+    ) -> list[sqlite3.Row]:
+        """Fairly-ordered claimable analysis rows (call without the lock)."""
+        rows = self._conn.execute(
+            """
+            SELECT a.*,
+                   al.src_ip AS _src_ip,
+                   al.signature_id AS _signature_id,
+                   al.severity AS _severity
+            FROM alert_analyses a LEFT JOIN alerts al ON al.id = a.alert_id
+            WHERE a.status = 'PENDING'
+               OR (a.status = 'FAILED' AND a.attempts < ?)
+            ORDER BY a.priority ASC, a.alert_id ASC LIMIT ?
+            """,
+            (max_attempts, steal_limit),
+        ).fetchall()
+        return rows
+
+    def claim_next_alert_analysis(
+        self, *, max_attempts: int = 3, now_epoch: float | None = None,
+        starvation_minutes: float = 20.0,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one retryable row as PROCESSING.
+
+        Claim order is priority-aware with anti-starvation aging, so low
+        priority events are not starved by a continuous stream of new
+        critical alerts. FAILED rows are retryable until ``max_attempts``.
         """
         now_epoch = now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                row = self._conn.execute(
-                    """
-                    SELECT a.alert_id FROM alert_analyses a
-                    WHERE a.status = 'PENDING'
-                       OR (a.status = 'FAILED' AND a.attempts < ?)
-                    ORDER BY a.alert_id ASC LIMIT 1
-                    """,
-                    (max_attempts,),
-                ).fetchone()
-                if row is None:
+                rows = self._analysis_candidates(max_attempts)
+                if not rows:
                     self._conn.execute("COMMIT")
                     return None
+                now_iso = _now_iso()
+                best = None
+                best_key = None
+                for r in rows:
+                    key = self._analysis_effective_order(
+                        r["priority"], r["created_at"], now_epoch, starvation_minutes
+                    )
+                    if best_key is None or key < best_key:
+                        best, best_key = r, key
+                if best is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                self._conn.execute(
+                    """
+                    UPDATE alert_analyses
+                    SET status = 'PROCESSING', started_at = COALESCE(started_at, ?)
+                    WHERE alert_id = ?
+                    """,
+                    (now_iso, best["alert_id"]),
+                )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
-        self.start_alert_analysis(row["alert_id"])
-        return self.get_alert_analysis(row["alert_id"])
+        return self.get_alert_analysis(best["alert_id"])
+
+    def claim_next_alert_analysis_batch(
+        self, *, max_batch: int = 5, max_attempts: int = 3,
+        now_epoch: float | None = None, starvation_minutes: float = 20.0,
+    ) -> list[dict[str, Any]]:
+        """Claim one *coherent group* of queued analyses as a single batch.
+
+        Grouping key: ``(src_ip, signature_id)`` — repeated matches of the
+        same rule on the same source (e.g. a scanning tool producing dozens
+        of identical alerts) are analyzed in one shared model request. Each
+        row keeps its own alert_id, evidence and result; nothing is merged
+        away. Empty/partial groups degrade gracefully: a group of 1 uses the
+        exact single-alert path.
+        """
+        now_epoch = now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+        if max_batch <= 1:
+            row = self.claim_next_alert_analysis(
+                max_attempts=max_attempts, now_epoch=now_epoch,
+                starvation_minutes=starvation_minutes,
+            )
+            return [row] if row else []
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._analysis_candidates(max_attempts)
+                if not rows:
+                    self._conn.execute("COMMIT")
+                    return []
+                # pick the batch lead with the fairness-aware order key
+                scored = sorted(
+                    rows, key=lambda r: self._analysis_effective_order(
+                        r["priority"], r["created_at"], now_epoch, starvation_minutes
+                    )
+                )
+                lead = scored[0]
+                peers = [
+                    r for r in scored[1:]
+                    if r["_src_ip"] == lead["_src_ip"]
+                    and r["_signature_id"] == lead["_signature_id"]
+                    and r["_severity"] == lead["_severity"]
+                ][: max(0, max_batch - 1)]
+                chosen = [lead, *peers]
+                now_iso = _now_iso()
+                for i, r in enumerate(chosen):
+                    self._conn.execute(
+                        """
+                        UPDATE alert_analyses
+                        SET status = 'PROCESSING',
+                            started_at = COALESCE(started_at, ?),
+                            batch_id = ?
+                        WHERE alert_id = ?
+                        """,
+                        (now_iso, f"batch-{lead['alert_id']}-{now_iso}", r["alert_id"]),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        ids = [r for r in chosen]
+        # re-read under the lock in a single sweep for consistent snapshots
+        out = []
+        with self._lock:
+            for r in ids:
+                row = self._conn.execute(
+                    "SELECT * FROM alert_analyses WHERE alert_id = ?", (r["alert_id"],)
+                ).fetchone()
+                if row:
+                    out.append(self._alert_analysis_row_to_dict(row))
+        # group order: keep the batch in rowid order for the prompt builder
+        out.sort(key=lambda d: d["alert_id"])
+        return out
 
     def get_alert_analysis(self, alert_id: int) -> dict[str, Any] | None:
         with self._lock:
@@ -1967,7 +2129,8 @@ class Database:
             self._conn.commit()
 
     def complete_alert_analysis(
-        self, alert_id: int, *, analysis: dict[str, Any], model: str, prompt_version: str
+        self, alert_id: int, *, analysis: dict[str, Any], model: str,
+        prompt_version: str, duration_ms: float | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute(
@@ -1976,7 +2139,9 @@ class Database:
                        summary = ?, importance = ?, evidence_json = ?,
                        anomaly_likelihood = ?, confidence = ?, recommendation = ?,
                        model = ?, prompt_version = ?, error = NULL,
-                       attempts = attempts + 1, analyzed_at = ?
+                       attempts = attempts + 1,
+                       duration_ms = ?
+                       , analyzed_at = ?
                 WHERE alert_id = ?
                 """,
                 (
@@ -1986,7 +2151,8 @@ class Database:
                     analysis.get("anomaly_likelihood"),
                     analysis.get("confidence"),
                     analysis.get("recommendation"),
-                    model, prompt_version, _now_iso(), alert_id,
+                    model, prompt_version,
+                    duration_ms, _now_iso(), alert_id,
                 ),
             )
             self._conn.commit()
@@ -2008,7 +2174,8 @@ class Database:
         with self._lock:
             cur = self._conn.execute(
                 """
-                UPDATE alert_analyses SET status = 'PENDING', error = NULL, attempts = 0
+                UPDATE alert_analyses SET status = 'PENDING', error = NULL,
+                       attempts = 0, started_at = NULL, batch_id = NULL
                 WHERE alert_id = ?
                 """,
                 (alert_id,),

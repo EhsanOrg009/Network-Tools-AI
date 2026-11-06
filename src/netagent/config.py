@@ -150,6 +150,17 @@ class Settings(BaseSettings):
     # Upper bound on PENDING rows created per sweep — the queue can grow
     # gradually but never without bound.
     ai_analysis_backlog_limit: int = Field(default=200, ge=10, le=5000)
+    # Batch analysis: related alerts (same source IP + same rule + same
+    # severity) share one model request to cut request count on weak local
+    # hardware. Each alert still gets its own stored result; uncovered items
+    # fall back to individual analysis. 1 disables batching.
+    ai_analysis_batch_size: int = Field(default=5, ge=1, le=10)
+    # Anti-starvation: every this-many minutes of waiting improves a queued
+    # row's effective priority by one level (bounded), so low-priority events
+    # eventually get analyzed even under a constant critical-event stream.
+    ai_analysis_starvation_minutes: float = Field(
+        default=20.0, ge=1.0, le=1440.0
+    )
 
     # ------------------------------------------------------------------
     # Endpoint traffic monitoring (v6) — host-local metadata only

@@ -16,9 +16,14 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request
 
+import hashlib
+
 from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import (
+    AdminMemoryCreate,
+    AdminMemoryRevokeBody,
+    AdminMemoryUpdateBody,
     AdminScriptCreate,
     ConsoleCommandCreate,
     ConsoleSessionCreate,
@@ -36,6 +41,7 @@ from netagent.services import console as console_service
 from netagent.services import tasks as task_service
 from netagent.services.agents import agent_public_view
 from netagent.services.discovery import effective_discovery_scope
+from netagent.services.knowledge import validate_memory_fields
 
 router = APIRouter(prefix="/api/admin/v1")
 
@@ -654,6 +660,202 @@ def get_ai_activity(
     if row is None:
         raise HTTPException(status_code=404, detail="درخواستی با این شناسه یافت نشد.")
     return row
+
+
+# ---------------------------------------------------------------------------
+# Persistent knowledge base (v9): AI memory (admin-owned)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/ai-memories",
+    tags=["حافظه‌ی دائمی هوش مصنوعی"],
+    summary="فهرست حافظه‌ها (دانش تأییدشده و پیش‌نویس‌ها)",
+    description=(
+        "همه‌ی رکوردهای حافظه با وضعیت: `APPROVED` (قابل استفاده در تحلیل)، "
+        "`PENDING_APPROVAL` (پیشنهاد AI و فقط با تأیید مدیر فعال می‌شود)، "
+        "`REVOKED` و `EXPIRED`. رکوردهای منقضی‌شده به‌صورت خودکار علامت‌گذاری "
+        "می‌شوند و دیگر در تحلیل استفاده نمی‌شوند."
+    ),
+    responses=_responses(
+        "فهرست حافظه‌ها (جدیدترین اول).",
+        {"items": [{
+            "memory_id": "mem_9c2b1f",
+            "title": "سرویس Tor روی این عامل عمداً فعال است",
+            "category": "approved_service",
+            "agent_id": "agt_1a2c", "scope": "agent",
+            "status": "APPROVED",
+            "expires_at": None, "hit_count": 4,
+        }]},
+    ),
+)
+def list_ai_memories(
+    request: Request,
+    category: str | None = Query(None, description="فیلتر دسته‌بندی."),
+    status: str | None = Query(None, description="فیلتر وضعیت."),
+    agent_id: str | None = Query(None, description="فیلتر عامل."),
+    limit: int = Query(200, ge=1, le=1000, description="حداکثر تعداد رکورد."),
+    offset: int = Query(0, ge=0, description="شیفت صفحه‌بندی."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    items = db.list_memories(
+        category=category, status=status, agent_id=agent_id,
+        limit=limit, offset=offset,
+    )
+    return {"items": items}
+
+
+@router.post(
+    "/ai-memories",
+    tags=["حافظه‌ی دائمی هوش مصنوعی"],
+    summary="ثبت مستقیم حافظه توسط مدیر (بلافاصله APPROVED)",
+    description=(
+        "دانش مدیریتی را مستقیم ثبت کنید؛ رکورد با `source=administrator` و وضعیت "
+        "APPROVED از همان تحلیل بعدی قابل استفاده است. برای جلوگیری از مسمومیت "
+        "حافظه، مدل و لاگ به این مسیر دسترسی ندارند؛ پیشنهادهای AI از مسیر "
+        "سؤال‌ها (AI Knowledge) می‌آیند و تا تأیید در همان وضعیت می‌مانند."
+    ),
+    responses=_responses(
+        "رکورد حافظه‌ی ثبت‌شده.",
+        {"memory_id": "mem_9c2b1f", "status": "APPROVED"},
+    ),
+    status_code=201,
+)
+def create_admin_memory(
+    request: Request,
+    body: AdminMemoryCreate,
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    errors: list[str] = []
+    if not validate_memory_fields(
+        category=body.category, scope=body.scope, agent_id=body.agent_id,
+        host=body.host, process=body.process, service=body.service,
+        network=body.network, errors=errors,
+    ):
+        raise HTTPException(status_code=422, detail="؛ ".join(errors))
+    memory_id = (
+        "mem_" + hashlib.sha256(
+            f"{body.title}|{body.agent_id}|{body.host}".encode()
+        ).hexdigest()[:16]
+    )
+    if db.get_memory(memory_id) is None:
+        db.create_memory(
+            memory_id=memory_id, title=body.title, description=body.description,
+            category=body.category, agent_id=body.agent_id, host=body.host,
+            process=body.process, service=body.service, network=body.network,
+            evidence=[e for e in body.evidence if isinstance(e, str)],
+            source="administrator", created_by=actor,
+            status="APPROVED", confidence=body.confidence, scope=body.scope,
+            expires_at=body.expires_at or None,
+        )
+    db.record_audit(actor=actor, action="memory.create", target=memory_id,
+                    detail={"category": body.category, "scope": body.scope})
+    return db.get_memory(memory_id)  # type: ignore[return-value]
+
+
+@router.post(
+    "/ai-memories/{memory_id}/approve",
+    tags=["حافظه‌ی دائمی هوش مصنوعی"],
+    summary="تأیید یک حافظه‌ی پیش‌نهادی",
+    description=(
+        "تنها مسیر PENDING_APPROVAL → APPROVED در کل سامانه همین است و مدل/لاگ "
+        "نمی‌توانند از آن عبور کنند؛ عملیات در حسابرسی ثبت می‌شود."
+    ),
+    responses=_responses(
+        "حافظه‌ی تأییدشده.",
+        {"memory_id": "memA_11", "status": "APPROVED"},
+        not_found="حافظه‌ای با این شناسه نیست.",
+    ),
+)
+def approve_ai_memory(
+    request: Request,
+    memory_id: str = Path(description="شناسه حافظه."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    if not db.approve_memory(memory_id, approved_by=actor):
+        if db.get_memory(memory_id) is None:
+            raise HTTPException(status_code=404, detail="حافظه‌ای با این شناسه نیست.")
+        raise HTTPException(status_code=409, detail="حافظه در وضعیت تأییدپذیر نیست.")
+    db.record_audit(actor=actor, action="memory.approve", target=memory_id)
+    return db.get_memory(memory_id)  # type: ignore[return-value]
+
+
+@router.post(
+    "/ai-memories/{memory_id}/revoke",
+    tags=["حافظه‌ی دائمی هوش مصنوعی"],
+    summary="لغو حافظه",
+    description=(
+        "وضعیت به REVOKED تغییر می‌کند؛ حافظه از تحلیل‌ها حذف می‌شود ولی برای "
+        "حسابرسی باقی می‌ماند. دلیل لغو در سابقه ذخیره می‌شود."
+    ),
+    responses=_responses(
+        "حافظه‌ی لغوشده.",
+        {"memory_id": "mem_9c2b1f", "status": "REVOKED"},
+        not_found="حافظه‌ای با این شناسه نیست.",
+    ),
+)
+def revoke_ai_memory(
+    request: Request,
+    memory_id: str = Path(description="شناسه حافظه."),
+    body: AdminMemoryRevokeBody | None = None,
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    reason = body.reason if body else None
+    if not db.revoke_memory(memory_id, revoked_by=actor, reason=reason):
+        if db.get_memory(memory_id) is None:
+            raise HTTPException(status_code=404, detail="حافظه‌ای با این شناسه نیست.")
+        raise HTTPException(status_code=409, detail="حافظه قابل لغو نیست.")
+    db.record_audit(actor=actor, action="memory.revoke", target=memory_id,
+                    detail={"reason": reason})
+    return db.get_memory(memory_id)  # type: ignore[return-value]
+
+
+@router.post(
+    "/ai-memories/{memory_id}/update",
+    tags=["حافظه‌ی دائمی هوش مصنوعی"],
+    summary="اصلاح حافظه",
+    description=(
+        "اصلاح عنوان/توضیح/اطمینان/انقضا. محدوده‌ی اعتبار (agent/host/…) برای "
+        "ایمنی از این مسیر قابل تغییر نیست؛ اصلاح محدوده یعنی ثبت حافظه‌ی و لغو قبلی."
+    ),
+    responses=_responses(
+        "حافظه‌ی به‌روزشده.",
+        {"memory_id": "mem_9c2b1f"},
+        not_found="حافظه‌ای با این شناسه نیست.",
+    ),
+)
+def update_ai_memory(
+    request: Request,
+    body: AdminMemoryUpdateBody,
+    memory_id: str = Path(description="شناسه حافظه."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    changed = db.update_memory(
+        memory_id, title=body.title, description=body.description,
+        confidence=body.confidence,
+        expires_at=body.expires_at if body.expires_at is not None else ...,
+    )
+    if not changed:
+        if db.get_memory(memory_id) is None:
+            raise HTTPException(status_code=404, detail="حافظه‌ای با این شناسه نیست.")
+        raise HTTPException(status_code=400, detail="ایرادی برای اعمال وجود ندارد.")
+    db.record_audit(actor=actor, action="memory.update", target=memory_id)
+    return db.get_memory(memory_id)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

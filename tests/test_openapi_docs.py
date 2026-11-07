@@ -78,6 +78,11 @@ EXPECTED_ENDPOINTS = {
     ("GET", "/api/admin/v1/ai-activity/summary"),
     ("GET", "/api/admin/v1/ai-activity"),
     ("GET", "/api/admin/v1/ai-activity/{request_id}"),
+    ("GET", "/api/admin/v1/ai-memories"),
+    ("POST", "/api/admin/v1/ai-memories"),
+    ("POST", "/api/admin/v1/ai-memories/{memory_id}/approve"),
+    ("POST", "/api/admin/v1/ai-memories/{memory_id}/revoke"),
+    ("POST", "/api/admin/v1/ai-memories/{memory_id}/update"),
     ("GET", "/api/admin/v1/audit"),
 }
 

@@ -311,7 +311,8 @@ CREATE TABLE IF NOT EXISTS alert_analyses (
     priority INTEGER NOT NULL DEFAULT 5,
     batch_id TEXT,
     started_at TEXT,
-    duration_ms REAL
+    duration_ms REAL,
+    memories_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alertanal_status ON alert_analyses(status, alert_id);
 CREATE INDEX IF NOT EXISTS idx_alertanal_prio ON alert_analyses(status, priority, alert_id);
@@ -355,6 +356,40 @@ CREATE TABLE IF NOT EXISTS ai_activity (
 );
 CREATE INDEX IF NOT EXISTS idx_aiactivity_epoch ON ai_activity(created_epoch);
 CREATE INDEX IF NOT EXISTS idx_aiactivity_status ON ai_activity(status, created_epoch);
+
+CREATE TABLE IF NOT EXISTS ai_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    description TEXT,
+    category TEXT NOT NULL,
+    agent_id TEXT,
+    host TEXT,
+    process TEXT,
+    service TEXT,
+    network TEXT,
+    evidence_json TEXT,
+    source TEXT NOT NULL,
+    created_by TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING_APPROVAL',
+    confidence TEXT,
+    scope TEXT NOT NULL DEFAULT 'event',
+    created_at TEXT NOT NULL,
+    created_epoch REAL NOT NULL,
+    updated_at TEXT,
+    expires_at TEXT,
+    expiry_epoch REAL,
+    approved_by TEXT,
+    approved_at TEXT,
+    revoked_by TEXT,
+    revoke_reason TEXT,
+    question_id TEXT,
+    alert_id INTEGER,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    last_hit_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memories_status ON ai_memories(status, category);
+CREATE INDEX IF NOT EXISTS idx_memories_agent ON ai_memories(agent_id, host);
 """
 
 
@@ -368,7 +403,20 @@ _ADDITIVE_MIGRATIONS = (
     "ALTER TABLE alert_analyses ADD COLUMN batch_id TEXT",
     "ALTER TABLE alert_analyses ADD COLUMN started_at TEXT",
     "ALTER TABLE alert_analyses ADD COLUMN duration_ms REAL",
+    "ALTER TABLE alert_analyses ADD COLUMN memories_json TEXT",
     "CREATE INDEX IF NOT EXISTS idx_alertanal_prio ON alert_analyses(status, priority, alert_id)",
+)
+
+
+# Legacy orphan tables left by an interrupted development session (all empty
+# in this deployment). Their shapes collide with the current v9+ design, so
+# the *names* are archived to ``legacy_<name>`` (rows — if any — are kept and
+# renamed with the table; nothing is deleted) and the current-shape tables are
+# created by the schema script.
+_LEGACY_ORPHAN_TABLES = (
+    "ai_memories", "ai_memory_history", "action_proposals", "knowledge_questions",
+    "llm_activity_events", "llm_requests", "monitoring_events",
+    "monitoring_schedules", "screen_sessions", "traffic_baselines",
 )
 
 
@@ -388,9 +436,25 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            self._archive_legacy_tables()
             self._conn.executescript(_SCHEMA)
             self._apply_additive_migrations()
             self._conn.commit()
+
+    def _archive_legacy_tables(self) -> None:
+        for name in _LEGACY_ORPHAN_TABLES:
+            exists = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (name,),
+            ).fetchone()
+            legacy_name = f"legacy_{name}"
+            already = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (legacy_name,),
+            ).fetchone()
+            if not exists or already:
+                continue
+            self._conn.execute(f"ALTER TABLE {name} RENAME TO {legacy_name}")
 
     def _apply_additive_migrations(self) -> None:
         for statement in _ADDITIVE_MIGRATIONS:
@@ -616,7 +680,10 @@ class Database:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT a.*, e.raw_json
+                SELECT a.*,
+                       e.src_ip AS event_src_ip, e.dest_ip AS event_dest_ip,
+                       e.proto AS event_proto, e.app_proto AS event_app_proto,
+                       e.raw_json
                 FROM alerts a JOIN events e ON e.id = a.event_id
                 WHERE a.id = ?
                 """,
@@ -2143,6 +2210,13 @@ class Database:
                 d.pop("evidence_json", None)
         else:
             d.pop("evidence_json", None)
+        if d.get("memories_json"):
+            try:
+                d["memories_used"] = json.loads(d.pop("memories_json"))
+            except (TypeError, ValueError):
+                d.pop("memories_json", None)
+        else:
+            d.pop("memories_json", None)
         return d
 
     def start_alert_analysis(self, alert_id: int) -> None:
@@ -2156,6 +2230,7 @@ class Database:
     def complete_alert_analysis(
         self, alert_id: int, *, analysis: dict[str, Any], model: str,
         prompt_version: str, duration_ms: float | None = None,
+        memories_used: list[str] | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute(
@@ -2165,8 +2240,9 @@ class Database:
                        anomaly_likelihood = ?, confidence = ?, recommendation = ?,
                        model = ?, prompt_version = ?, error = NULL,
                        attempts = attempts + 1,
-                       duration_ms = ?
-                       , analyzed_at = ?
+                       duration_ms = ?,
+                       memories_json = ?,
+                       analyzed_at = ?
                 WHERE alert_id = ?
                 """,
                 (
@@ -2177,7 +2253,9 @@ class Database:
                     analysis.get("confidence"),
                     analysis.get("recommendation"),
                     model, prompt_version,
-                    duration_ms, _now_iso(), alert_id,
+                    duration_ms,
+                    json.dumps((memories_used or []), ensure_ascii=False),
+                    _now_iso(), alert_id,
                 ),
             )
             self._conn.commit()
@@ -2475,6 +2553,242 @@ class Database:
             )
             self._conn.commit()
         return cur.rowcount
+
+    # =========================================================================
+    # Persistent knowledge base (v9): verified AI memory
+    # =========================================================================
+    #
+    # Only APPROVED memories are ever used in analysis. Log text, agent
+    # reports and model output can *suggest* a memory (PENDING_APPROVAL,
+    # source != 'administrator') but never activate it by themselves — this
+    # is the anti-poisoning boundary.
+
+    def create_memory(
+        self, *, memory_id: str, title: str, description: str | None,
+        category: str, agent_id: str | None, host: str | None,
+        process: str | None, service: str | None, network: str | None,
+        evidence: list[dict[str, Any]] | None, source: str,
+        created_by: str | None, status: str, confidence: str | None,
+        scope: str, expires_at: str | None = None,
+        question_id: str | None = None, alert_id: int | None = None,
+    ) -> str:
+        now = _now_iso()
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO ai_memories(
+                    memory_id, title, description, category, agent_id, host,
+                    process, service, network, evidence_json, source,
+                    created_by, status, confidence, scope,
+                    created_at, created_epoch, expires_at, expiry_epoch,
+                    question_id, alert_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    memory_id, title[:200], description, category, agent_id,
+                    host, process, service, network,
+                    json.dumps(evidence or [], ensure_ascii=False, default=str),
+                    source, created_by, status, confidence, scope[:20],
+                    now, now_epoch, expires_at,
+                    (datetime.fromisoformat(expires_at).timestamp()
+                     if expires_at else None),
+                    question_id, alert_id,
+                ),
+            )
+            self._conn.commit()
+        return memory_id
+
+    @staticmethod
+    def _memory_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        if d.get("evidence_json"):
+            try:
+                d["evidence"] = json.loads(d.pop("evidence_json"))
+            except (TypeError, ValueError):
+                d.pop("evidence_json", None)
+        else:
+            d.pop("evidence_json", None)
+        return d
+
+    def get_memory(self, memory_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ai_memories WHERE memory_id = ?", (memory_id,)
+            ).fetchone()
+        return self._memory_row_to_dict(row) if row else None
+
+    def list_memories(
+        self, *, category: str | None = None, status: str | None = None,
+        agent_id: str | None = None, include_expired: bool = True,
+        limit: int = 200, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc).timestamp()
+        # lazy expiry bookkeeping: rows past their validity window are EXPIRED
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE ai_memories SET status = 'EXPIRED'
+                WHERE expiry_epoch IS NOT NULL AND expiry_epoch < ?
+                  AND status IN ('APPROVED', 'PENDING_APPROVAL')
+                """,
+                (now,),
+            )
+        where: list[str] = []
+        params: list[Any] = []
+        if category:
+            where.append("category = ?")
+            params.append(category)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if agent_id:
+            where.append("agent_id = ?")
+            params.append(agent_id)
+        if not include_expired:
+            where.append("status != 'EXPIRED'")
+        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM ai_memories {cond}
+                ORDER BY id DESC LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+        return [self._memory_row_to_dict(r) for r in rows]
+
+    def approve_memory(
+        self, memory_id: str, *, approved_by: str, status: str = "APPROVED"
+    ) -> bool:
+        ok = self._memory_status_check(memory_id, allowed=("PENDING_APPROVAL",))
+        if not ok:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE ai_memories SET status = ?, approved_by = ?, approved_at = ?,
+                       updated_at = ?
+                WHERE memory_id = ?
+                """,
+                (status, approved_by, _now_iso(), _now_iso(), memory_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def revoke_memory(
+        self, memory_id: str, *, revoked_by: str, reason: str | None = None
+    ) -> bool:
+        """Administrator cancels knowledge. The reason is kept, not the row —
+        history stays auditable while the knowledge stops being used."""
+        ok = self._memory_status_check(
+            memory_id, allowed=("APPROVED", "PENDING_APPROVAL")
+        )
+        if not ok:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE ai_memories SET status = 'REVOKED', revoked_by = ?,
+                       revoke_reason = ?, updated_at = ?
+                WHERE memory_id = ?
+                """,
+                (revoked_by, reason, _now_iso(), memory_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_memory(
+        self, memory_id: str, *, title: str | None = None,
+        description: str | None = None, confidence: str | None = None,
+        expires_at: str | None = ...,  # type: ignore[assignment]
+    ) -> bool:
+        updates: dict[str, Any] = {}
+        if title is not None:
+            updates["title"] = title[:200]
+        if description is not None:
+            updates["description"] = description
+        if confidence is not None:
+            updates["confidence"] = confidence
+        if expires_at is not ...:
+            updates["expires_at"] = expires_at
+            updates["expiry_epoch"] = (
+                datetime.fromisoformat(expires_at).timestamp() if expires_at else None
+            )
+        if not updates:
+            return False
+        updates["updated_at"] = _now_iso()
+        with self._lock:
+            sets = ", ".join(f"{k} = ?" for k in updates)
+            cur = self._conn.execute(
+                f"UPDATE ai_memories SET {sets} WHERE memory_id = ?",
+                (*updates.values(), memory_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def _memory_status_check(
+        self, memory_id: str, *, allowed: tuple[str, ...]
+    ) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM ai_memories WHERE memory_id = ?", (memory_id,)
+            ).fetchone()
+        return bool(row) and row["status"] in allowed
+
+    def usable_memories(self, *, now_epoch: float | None = None) -> list[dict[str, Any]]:
+        """APPROVED, non-revoked, non-expired rows (candidate pool only)."""
+        now_epoch = now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM ai_memories
+                WHERE status = 'APPROVED'
+                  AND (expiry_epoch IS NULL OR expiry_epoch >= ?)
+                ORDER BY id DESC LIMIT 2000
+                """,
+                (now_epoch,),
+            ).fetchall()
+        return [self._memory_row_to_dict(r) for r in rows]
+
+    def record_memory_hits(self, memory_ids: list[str]) -> None:
+        """Count real retrievals (observability signal, not truth)."""
+        if not memory_ids:
+            return
+        now = _now_iso()
+        with self._lock:
+            for mid in memory_ids[:50]:
+                self._conn.execute(
+                    """
+                    UPDATE ai_memories SET hit_count = hit_count + 1, last_hit_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (now, mid),
+                )
+            self._conn.commit()
+
+    def memory_usage_summary(self) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT status, COUNT(*) AS c FROM ai_memories GROUP BY status
+                """
+            ).fetchall()
+            per_cat = [
+                {"category": r["category"], "approved": (
+                    self._conn.execute(
+                        """
+                        SELECT COUNT(*) AS c FROM ai_memories
+                        WHERE category = ? AND status = 'APPROVED'
+                        """,
+                        (r["category"],),
+                    ).fetchone()["c"]
+                )}
+                for r in self._conn.execute(
+                    "SELECT DISTINCT category FROM ai_memories ORDER BY category"
+                ).fetchall()
+            ]
+        return {"status_counts": {r["status"]: r["c"] for r in rows}, "categories": per_cat}
 
     # =========================================================================
     # Endpoint traffic monitoring (v6): per-interface counters + connections

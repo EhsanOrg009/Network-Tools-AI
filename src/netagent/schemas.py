@@ -533,6 +533,49 @@ class EnrollmentRejectBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Persistent knowledge base (v9) — AI memory
+# ---------------------------------------------------------------------------
+
+
+class AdminMemoryCreate(BaseModel):
+    """Administrator-created memory — enters APPROVED directly, these remain
+    usable knowledge from the very first analysis."""
+    model_config = {"extra": "ignore"}
+
+    title: str = Field(min_length=3, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    category: str = Field(
+        description=("approved_service | known_process | known_false_positive | "
+                     "known_network_behavior | known_device | incident_resolution | "
+                     "diagnostic_playbook")
+    )
+    agent_id: str | None = None
+    host: str | None = None
+    process: str | None = None
+    service: str | None = None
+    network: str | None = Field(default=None, description="CIDR، مثلاً 192.168.1.0/24")
+    scope: str = Field(default="agent")
+    confidence: str | None = None
+    expires_at: str | None = Field(default=None, description="تاریخ/زمان انقضا به شکل ISO؛ خالی = دائمی تا لغو")
+    evidence: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AdminMemoryRevokeBody(BaseModel):
+    model_config = {"extra": "ignore"}
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AdminMemoryUpdateBody(BaseModel):
+    model_config = {"extra": "ignore"}
+
+    title: str | None = Field(default=None, min_length=3, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    confidence: str | None = None
+    expires_at: str | None = None  # null = "no expiry"
+
+
+# ---------------------------------------------------------------------------
 # AI security-alert analysis (v5)
 # ---------------------------------------------------------------------------
 
@@ -552,3 +595,10 @@ class AlertAnalysis(BaseModel):
         description="میزان اطمینان تحلیل."
     )
     recommendation: str = Field(description="پیشنهاد اقدام بعدی برای مدیر شبکه (فارسی).")
+    memories_used: list[str] = Field(
+        default_factory=list,
+        description=(
+            "شناسه‌ی حافظه‌های تأییدشده‌ای که واقعاً در این تحلیل استفاده شدند؛ "
+            "شناسه‌های خارج از فهرست داده‌شده در پرامپت نادیده گرفته می‌شوند."
+        ),
+    )

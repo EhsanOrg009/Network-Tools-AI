@@ -24,6 +24,7 @@ from netagent.schemas import (
     AdminMemoryCreate,
     AdminMemoryRevokeBody,
     AdminMemoryUpdateBody,
+    AdminQuestionCreate,
     AdminScriptCreate,
     ConsoleCommandCreate,
     ConsoleSessionCreate,
@@ -41,7 +42,7 @@ from netagent.services import console as console_service
 from netagent.services import tasks as task_service
 from netagent.services.agents import agent_public_view
 from netagent.services.discovery import effective_discovery_scope
-from netagent.services.knowledge import validate_memory_fields
+from netagent.services.knowledge import ask_question, validate_memory_fields
 
 router = APIRouter(prefix="/api/admin/v1")
 
@@ -856,6 +857,124 @@ def update_ai_memory(
         raise HTTPException(status_code=400, detail="ایرادی برای اعمال وجود ندارد.")
     db.record_audit(actor=actor, action="memory.update", target=memory_id)
     return db.get_memory(memory_id)  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# AI knowledge questions (v10): admin asks; answer may propose memory
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/ai-questions",
+    tags=["پرسش هوشمند از دانش شبکه"],
+    summary="پرسیدن یک سؤال از مدل (همگام، بدون اجرای ابزار)",
+    description=(
+        "یک سؤال کوتاه درباره‌ی شبکه/هشدار از مدل محلی می‌پرسد. هیچ ابزاری اجرا "
+        "نمی‌شود؛ پاسخ ساختاریمند (answer + confidence) ذخیره می‌شود و اگر مدل "
+        "دانش جدیدی پیشنهاد کند، آن پیشنهاد فقط به‌صورت حافظه‌ی "
+        "`PENDING_APPROVAL` (source=question_resolve) ثبت می‌شود و تا تأیید شما "
+        "در هیچ تحلیلی استفاده نمی‌شود. فراخوانی تا دریافت پاسخ مکث می‌کند "
+        "(با مدل محلی معمولاً چند ثانیه)."
+    ),
+    responses=_responses(
+        "سؤال با پاسخ ذخیره‌شده یا خطای دقیق.",
+        {
+            "question_id": "q_1c2b3a4d5e6f7788",
+            "question": "چرا این هشدار تکرار می‌شود؟",
+            "status": "ANSWERED",
+            "answer": "…", "answer_meta": {"confidence": "medium"},
+            "memory_proposal_ids": [],
+        },
+    ),
+)
+def create_ai_question(
+    request: Request,
+    body: AdminQuestionCreate,
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    if body.alert_id is not None and db.get_alert(body.alert_id) is None:
+        raise HTTPException(status_code=404, detail="هشداری با این شناسه نیست.")
+    try:
+        record = ask_question(
+            db, request.app.state.llm,
+            question=body.question, agent_id=body.agent_id,
+            alert_id=body.alert_id, asked_by=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # model/network failure — the FAILED record stays
+        raise HTTPException(
+            status_code=502, detail=f"پرسش ناموفق بود: {exc}"[:300]
+        ) from exc
+    db.record_audit(actor=actor, action="question.create",
+                    target=record.get("question_id"))
+    return record
+
+
+@router.get(
+    "/ai-questions",
+    tags=["پرسش هوشمند از دانش شبکه"],
+    summary="فهرست سؤال‌های مدیر و پاسخ‌ها",
+    description=(
+        "سؤال‌های ثبت‌شده (جدیدترین اول) با وضعیت `PENDING`، `ANSWERED`، `FAILED` "
+        "و شناسه‌ی حافظه‌های پیشنهادی. حافظه‌های پیشنهادی از این لیست همیشه "
+        "PENDING_APPROVAL‌اند تا مدیر در صفحه‌ی حافظه آن‌ها را تأیید/لغو کند."
+    ),
+    responses=_responses(
+        "فهرست سؤال‌ها.",
+        {"items": [{
+            "question_id": "q_1c2b3a4d5e6f7788",
+            "question": "…",
+            "status": "ANSWERED",
+            "memory_proposal_ids": ["memq_11ff22"],
+        }]},
+    ),
+)
+def list_ai_questions(
+    request: Request,
+    status: str | None = Query(None, description="فیلتر وضعیت."),
+    limit: int = Query(100, ge=1, le=500, description="حداکثر تعداد ردیف."),
+    offset: int = Query(0, ge=0, description="صفحه‌بندی."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    items = db.list_ai_questions(status=status, limit=limit, offset=offset)
+    return {"items": items}
+
+
+@router.get(
+    "/ai-questions/{question_id}",
+    tags=["پرسش هوشمند از دانش شبکه"],
+    summary="جزئیات یک سؤال",
+    description=(
+        "رکورد کامل سؤال: متن سؤال، زمینه‌ی ارسال‌شده، پاسخ ذخیره‌شده (کوتاه)، "
+        "اطمینان، مدت پاسخ و شناسه‌ی حافظه‌های پیشنهادی که هنوز در وضعیت "
+        "`PENDING_APPROVAL` منتظر تصمیم مدیرند. پاسخ مدل هرگز مستقیم اجرا "
+        "نمی‌شود و در حسابرسی فقط ثبت سؤال/پرسشنگار دیده می‌شود."
+    ),
+    responses=_responses(
+        "رکورد سؤال.",
+        {"question_id": "q_1c2b3a4d5e6f7788", "question": "…", "status": "ANSWERED"},
+        not_found="سؤالی با این شناسه نیست.",
+    ),
+)
+def get_ai_question(
+    request: Request,
+    question_id: str = Path(description="شناسه سؤال."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    record = db.get_ai_question(question_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="سؤالی با این شناسه نیست.")
+    return record
 
 
 # ---------------------------------------------------------------------------

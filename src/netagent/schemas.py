@@ -575,6 +575,18 @@ class AdminMemoryUpdateBody(BaseModel):
     expires_at: str | None = None  # null = "no expiry"
 
 
+class AdminQuestionCreate(BaseModel):
+    """Administrator question for the local model. No tools are run; the
+    round-trip is answer + a gated memory proposal only."""
+    model_config = {"extra": "ignore"}
+
+    question: str = Field(min_length=3, max_length=1000)
+    agent_id: str | None = None
+    alert_id: int | None = Field(
+        default=None, description="اختیاری: سؤال با شواهد همین هشدار همراه می‌شود."
+    )
+
+
 # ---------------------------------------------------------------------------
 # AI security-alert analysis (v5)
 # ---------------------------------------------------------------------------

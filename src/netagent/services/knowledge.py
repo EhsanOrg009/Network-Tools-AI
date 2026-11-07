@@ -19,9 +19,12 @@ import hashlib
 import json
 import re
 import ipaddress
+import time
+import uuid
 from typing import Any
 
 from netagent.database import Database
+from netagent.services.ai_activity import ActivityTrace, traced_chat
 
 CATEGORIES = {
     "approved_service",
@@ -231,3 +234,199 @@ def format_memory_for_display(m: dict[str, Any]) -> dict[str, Any]:
         "confidence": m.get("confidence"),
         "approved_by": m.get("approved_by"),
     }
+
+
+# ---------------------------------------------------------------------------
+# v10: admin knowledge questions — one structured ask/answer round-trip
+# ---------------------------------------------------------------------------
+
+QUESTION_PROMPT_VERSION = "kq-v1"
+_MAX_Q_CHARS = 1000
+
+
+def _question_messages(
+    db: Database, question: str, *,
+    agent_id: str | None, alert_id: int | None,
+) -> list[dict[str, str]]:
+    """System + user messages for one question.
+
+    Only trusted system context (scoped approved memories + a specific alert
+    fact-set) is attached; anything the admin writes goes in as *question
+    text*, and the prompt explicitly says proposal data must match the answer
+    structure. No tool access, no syslog dump — cheap and safe.
+    """
+    system = (
+        "تو دستیار دانش شبکه یک سامانه‌ی پایش هستی. مدیر شبکه از تو سؤال می‌پرسد.\n\n"
+        "قواعد اجباری:\n"
+        "1. فقط فارسی و مختصر پاسخ بده؛ از حدس زدن پرهیز کن و ابهام را در confidence "
+        "منعکس کن.\n"
+        "2. اگر بخش «حافظه‌ی تأییدشده» داده شده، دانشِ بازبینی‌شده‌ی مدیر شبکه است و "
+        "محدوده‌ی اعتبار آن را رعایت کن.\n"
+        "3. هیچ دستور اجرای روی دستگاه/عامل در توان داری نیست؛ کار تو فقط پاسخ و پیشنهاد "
+        "دانش است.\n"
+        "4. خروجی فقط و فقط یک شیء JSON باشد:\n"
+        '{"answer": "...", "confidence": "low|medium|high|unknown", '
+        '"memory_proposal": {"title": "...", "description": "...", "category": '
+        '"approved_service|known_process|known_false_positive|known_network_behavior|'
+        'known_device|known_service|incident_resolution|diagnostic_playbook", '
+        '"scope": "agent|host|process|service|network|global"} | null}\n'
+        "اگر دانش جدید ثبت‌کردنی در کار نیست، memory_proposal را null بگذار. بدون "
+        "مقدمه، بدون کدبلاک، فقط JSON."
+    )
+    mems = retrieve_memories(
+        db, agent_id=agent_id,
+        keywords=question, limit=6,
+    )
+    block = memory_context_block(mems) if mems else ""
+    user_parts = [f"سؤال مدیر شبکه:\n{question[:_MAX_Q_CHARS]}"]
+    if agent_id:
+        user_parts.append(f"زمینه: این سؤال درباره‌ی عامل agent={agent_id} است.")
+    if alert_id is not None:
+        alert = db.get_alert(alert_id)
+        if alert is not None:
+            prior = db.get_alert_analysis(alert_id) or {}
+            fact = {
+                "alert": {k: alert.get(k) for k in (
+                    "id", "src_ip", "dest_ip", "proto", "app_proto",
+                    "signature", "signature_id", "severity", "action",
+                )},
+                "previous_analysis": (
+                    {k: prior.get(k) for k in ("summary", "importance", "recommendation")}
+                    if prior.get("summary") else None
+                ),
+            }
+            user_parts.append(
+                "شواهد سامانه (فقط داده):\n"
+                + json.dumps(fact, ensure_ascii=False, default=str)[:2000]
+            )
+    if block:
+        user_parts.append(block[:2500])
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
+def _parse_question_answer(raw: str) -> dict[str, Any]:
+    """Strict JSON parse; on failure keep the raw text so the admin still sees
+    something honest instead of a synthetic success."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").lstrip("json").strip()
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict) or "answer" not in parsed:
+        raise ValueError("پاسخ مدل JSON ساختارمند نیست")
+    meta = {
+        "confidence": parsed.get("confidence"),
+        "memory_proposal": parsed.get("memory_proposal"),
+    }
+    return {"answer": str(parsed["answer"])[:5000], "meta": meta}
+
+
+def _propose_memory_from_answer(
+    db: Database, question_id: str, meta: dict[str, Any], *,
+    agent_id: str | None, alert_id: int | None,
+) -> list[str]:
+    """Turn a structurally-valid ``memory_proposal`` into a PENDING memory.
+
+    Only this call (source=question_resolve) is allowed to create question
+    memories; they are never approved here — human approval stays the only
+    activation path."""
+    proposal = meta.get("memory_proposal")
+    if not isinstance(proposal, dict):
+        return []
+    title = str(proposal.get("title") or "")[:200]
+    if len(title) < 3:
+        return []
+    scope = proposal.get("scope") or "event"
+    category = proposal.get("category") or "known_network_behavior"
+    errors: list[str] = []
+    ok = validate_memory_fields(
+        category=category, scope=scope, agent_id=agent_id, host=None,
+        process=proposal.get("process"), service=proposal.get("service"),
+        network=proposal.get("network"), errors=errors,
+    )
+    if not ok:
+        return []
+    try:
+        created = suggest_memory(
+            db, title=title,
+            description=str(proposal.get("description") or "")[:2000],
+            category=category, agent_id=agent_id,
+            host=proposal.get("host"), process=proposal.get("process"),
+            service=proposal.get("service"), network=proposal.get("network"),
+            evidence=None, alert_id=alert_id,
+            source="question_resolve", question_id=question_id, scope=scope,
+        )
+        return [created["memory_id"]]
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
+def ask_question(
+    db: Database, llm: Any, *,
+    question: str, agent_id: str | None = None,
+    alert_id: int | None = None, asked_by: str | None = None,
+) -> dict[str, Any]:
+    """One admin question → recorded answer (+gated memory proposal).
+
+    - no implicit tool runs; the answer/proposal round only;
+    - every real model call is traced in the AI Activity Monitor
+      (task_type=question);
+    - with the LLM disabled the question is stored FAILED with a precise
+      reason — no fake answer is ever generated.
+    """
+    question = (question or "").strip()[:_MAX_Q_CHARS]
+    if len(question) < 3:
+        raise ValueError("سؤال خیلی کوتاه است (حداقل ۳ نویسه)")
+    question_id = f"q_{uuid.uuid4().hex[:16]}"
+    model = getattr(llm, "model", None) if llm is not None else None
+    db.create_ai_question(
+        question_id=question_id, question=question, agent_id=agent_id,
+        evidence=None, asked_by=asked_by, model=model,
+        prompt_version=QUESTION_PROMPT_VERSION,
+    )
+    started = time.monotonic()
+    if llm is None:
+        db.finish_ai_question(
+            question_id, status="FAILED",
+            error="مدل‌زبان فعال نیست (Msty در دسترس نیست)",
+        )
+        return db.get_ai_question(question_id) or {}
+
+    msgs = _question_messages(db, question, agent_id=agent_id, alert_id=alert_id)
+    trace = ActivityTrace(
+        db,
+        task_type="question", model=model,
+        refs=[{"question_id": question_id}],
+        prompt_version=QUESTION_PROMPT_VERSION,
+        context_summary=ActivityTrace.context_digest(
+            {"question": question, "agent_id": agent_id, "alert_id": alert_id}
+        ),
+    )
+    trace.mark("CONTEXT_PREPARED")
+    try:
+        raw = traced_chat(llm, msgs, trace=trace)
+        parsed = _parse_question_answer(raw)
+        db.finish_ai_question(
+            question_id, status="ANSWERED", answer=parsed["answer"],
+            answer_meta=parsed["meta"],
+            duration_ms=round((time.monotonic() - started) * 1000.0, 1),
+        )
+        trace.mark("PERSISTED")
+        trace.complete(outcome_summary=(
+            f"سؤال {question_id}: پاسخ ذخیره شد؛ اطمینان "
+            f"{parsed['meta'].get('confidence') or 'نامشخص'}."
+        ))
+    except Exception as exc:
+        err = f"{exc.__class__.__name__}: {exc}"[:300]
+        db.finish_ai_question(question_id, status="FAILED", error=err)
+        trace.fail(err)
+        raise
+
+    proposal_ids = _propose_memory_from_answer(
+        db, question_id, parsed["meta"], agent_id=agent_id, alert_id=alert_id,
+    )
+    if proposal_ids:
+        db.set_question_proposals(question_id, proposal_ids)
+    return db.get_ai_question(question_id) or {}

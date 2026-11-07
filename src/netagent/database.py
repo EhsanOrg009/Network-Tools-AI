@@ -390,6 +390,28 @@ CREATE TABLE IF NOT EXISTS ai_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_memories_status ON ai_memories(status, category);
 CREATE INDEX IF NOT EXISTS idx_memories_agent ON ai_memories(agent_id, host);
+
+CREATE TABLE IF NOT EXISTS ai_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id TEXT NOT NULL UNIQUE,
+    question TEXT NOT NULL,
+    context_json TEXT,
+    agent_id TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    answer TEXT,
+    answer_meta_json TEXT,
+    memory_proposal_ids TEXT,
+    asked_by TEXT,
+    asked_at TEXT NOT NULL,
+    asked_epoch REAL NOT NULL,
+    answered_at TEXT,
+    duration_ms REAL,
+    model TEXT,
+    prompt_version TEXT,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_aiquestions_epoch ON ai_questions(asked_epoch);
+CREATE INDEX IF NOT EXISTS idx_aiquestions_status ON ai_questions(status, asked_epoch);
 """
 
 
@@ -2789,6 +2811,120 @@ class Database:
                 ).fetchall()
             ]
         return {"status_counts": {r["status"]: r["c"] for r in rows}, "categories": per_cat}
+
+    # -------------------------------------------------------------------------
+    # AI knowledge questions (v10): admin asks; the answer may propose memory
+    # -------------------------------------------------------------------------
+
+    def create_ai_question(
+        self, *, question_id: str, question: str, agent_id: str | None = None,
+        evidence: list[dict[str, Any]] | None = None, asked_by: str | None = None,
+        model: str | None = None, prompt_version: str | None = None,
+    ) -> str:
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO ai_questions(
+                    question_id, question, context_json, agent_id,
+                    status, asked_by, asked_at, asked_epoch,
+                    model, prompt_version
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    question_id, question,
+                    json.dumps(evidence or [], ensure_ascii=False, default=str),
+                    agent_id, "PENDING", asked_by, now,
+                    datetime.now(timezone.utc).timestamp(),
+                    model, prompt_version,
+                ),
+            )
+            self._conn.commit()
+        return question_id
+
+    @staticmethod
+    def _question_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        if d.get("context_json"):
+            try:
+                d["evidence"] = json.loads(d.pop("context_json"))
+            except (TypeError, ValueError):
+                d.pop("context_json", None)
+        else:
+            d.pop("context_json", None)
+        if d.get("answer_meta_json"):
+            try:
+                d["answer_meta"] = json.loads(d.pop("answer_meta_json"))
+            except (TypeError, ValueError):
+                d.pop("answer_meta_json", None)
+        else:
+            d.pop("answer_meta_json", None)
+        if d.get("memory_proposal_ids"):
+            try:
+                d["memory_proposal_ids"] = json.loads(d["memory_proposal_ids"])
+            except (TypeError, ValueError):
+                d["memory_proposal_ids"] = []
+        return d
+
+    def get_ai_question(self, question_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ai_questions WHERE question_id = ?", (question_id,)
+            ).fetchone()
+        return self._question_row_to_dict(row) if row else None
+
+    def list_ai_questions(
+        self, *, status: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        where, params = [], []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM ai_questions {cond}
+                ORDER BY id DESC LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+        return [self._question_row_to_dict(r) for r in rows]
+
+    def finish_ai_question(
+        self, question_id: str, *, status: str, answer: str | None = None,
+        answer_meta: dict[str, Any] | None = None,
+        memory_proposal_ids: list[str] | None = None,
+        duration_ms: float | None = None, error: str | None = None,
+    ) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE ai_questions SET
+                    status = ?, answer = ?, answer_meta_json = ?,
+                    memory_proposal_ids = ?, answered_at = ?, duration_ms = ?,
+                    error = ?
+                WHERE question_id = ? AND status = 'PENDING'
+                """,
+                (
+                    status, answer,
+                    json.dumps(answer_meta, ensure_ascii=False, default=str)
+                    if answer_meta is not None else None,
+                    json.dumps(memory_proposal_ids or [], ensure_ascii=False),
+                    _now_iso() if status != "PENDING" else None,
+                    duration_ms, error, question_id,
+                ),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def set_question_proposals(self, question_id: str, proposal_ids: list[str]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE ai_questions SET memory_proposal_ids = ? WHERE question_id = ?",
+                (json.dumps(proposal_ids, ensure_ascii=False), question_id),
+            )
+            self._conn.commit()
 
     # =========================================================================
     # Endpoint traffic monitoring (v6): per-interface counters + connections

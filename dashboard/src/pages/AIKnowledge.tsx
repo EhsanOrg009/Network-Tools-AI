@@ -291,6 +291,113 @@ function CreateMemoryForm({ onCreated }: { onCreated: () => void }) {
   );
 }
 
+/* ---- ask the model card ------------------------------------------------- */
+
+interface QuestionRow {
+  question_id: string;
+  question: string;
+  status: string;
+  answer: string | null;
+  answer_meta?: { confidence?: string | null; memory_proposal?: unknown } | null;
+  memory_proposal_ids?: string[] | null;
+  error: string | null;
+  asked_at: string | null;
+  duration_ms: number | null;
+}
+
+const Q_STATUS: Record<string, { label: string; tone: string }> = {
+  PENDING: { label: "در انتظار پاسخ", tone: "badge-accent" },
+  ANSWERED: { label: "پاسخ داده شد", tone: "badge-ok" },
+  FAILED: { label: "ناموفق", tone: "badge-danger" },
+};
+
+function AskModel({ onMemoryChanged }: { onMemoryChanged: () => void }) {
+  const [items, setItems] = useState<QuestionRow[] | null>(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api.get<{ items: QuestionRow[] }>(
+        "/api/admin/v1/ai-questions?limit=20"
+      );
+      setItems(d.items);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : "خطای ناشناخته");
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const ask = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.post("/api/admin/v1/ai-questions", { question: text.trim() });
+      setText("");
+      await load();
+      onMemoryChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : "خطای ناشناخته");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+        <input
+          className="input" style={{ flex: 1, minWidth: 260 }}
+          placeholder="مثلاً: هشدارهای تکراری DNS روی این عامل طبیعی است؟"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && text.trim().length >= 3 && !busy) void ask(); }}
+          disabled={busy}
+        />
+        <button className="btn sm" disabled={busy || text.trim().length < 3} onClick={() => void ask()}>
+          {busy ? "در حال پرسش…" : "پرسش"}
+        </button>
+      </div>
+      {err && <div className="small" style={{ marginTop: 8, color: "var(--danger)" }}>{err}</div>}
+      <div className="small muted" style={{ marginTop: 8 }}>
+        هر پرسش همگام پاسخ می‌گیرد و هیچ ابزاری اجرا نمی‌شود. اگر مدل دانش جدیدی پیشنهاد
+        کند، ثبت آن فقط به‌صورت حافظه‌ی «در انتظار تأیید» است و فعال‌سازی با دست شماست.
+      </div>
+      <ul style={{ listStyle: "none", margin: 0, padding: 0, marginTop: 10 }}>
+        {(items ?? []).map((q) => {
+          const st = Q_STATUS[q.status] ?? { label: q.status, tone: "badge-muted" };
+          return (
+            <li key={q.question_id} className="card" style={{ padding: "8px 12px", marginBottom: 6 }}>
+              <div className="row small" style={{ gap: 8, flexWrap: "wrap" }}>
+                <b>{q.question}</b>
+                <div className="spacer" />
+                <span className={`badge ${st.tone}`}><span className="dot" />{st.label}</span>
+                {q.memory_proposal_ids && q.memory_proposal_ids.length > 0 && (
+                  <span className="badge badge-accent">
+                    <span className="dot" />پیشنهاد حافظه: {faNum(q.memory_proposal_ids.length)}
+                  </span>
+                )}
+              </div>
+              {(q.answer || q.error) && (
+                <div className="small" style={{ marginTop: 4 }}>
+                  {q.error
+                    ? <span style={{ color: "var(--danger)" }}>{q.error}</span>
+                    : q.answer}
+                </div>
+              )}
+            </li>
+          );
+        })}
+        {items !== null && items.length === 0 && items && (
+          <li className="small muted">هنوز پرسشی ثبت نشده است.</li>
+        )}
+      </ul>
+    </>
+  );
+}
+
 /* ---- page --------------------------------------------------------------- */
 
 export default function AIKnowledgePage() {
@@ -361,6 +468,15 @@ export default function AIKnowledgePage() {
       <div style={{ height: 12 }} />
 
       {error && <ErrorState message={error} onRetry={() => setRefresh((k) => k + 1)} />}
+
+      <Card
+        title="پرسش هوشمند از مدل"
+        extra={null}
+      >
+        <AskModel onMemoryChanged={() => setRefresh((k) => k + 1)} />
+      </Card>
+
+      <div style={{ height: 12 }} />
 
       <Card
         title="ثبت حافظه"

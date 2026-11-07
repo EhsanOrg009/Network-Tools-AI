@@ -32,6 +32,7 @@ from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import AlertAnalysis
 from netagent.services.ai_activity import ActivityTrace, traced_chat
+from netagent.services.actions import propose_investigation
 from netagent.services.knowledge import memory_context_block, retrieve_memories
 
 log = logging.getLogger("netagent.ai_analysis")
@@ -259,6 +260,26 @@ class AlertAnalysisWorker:
             analysis.memories_used = filtered
         return analysis
 
+    def _maybe_propose_followup(
+        self, alert_id: int, alert: dict[str, Any], analysis: Any,
+    ) -> None:
+        """Observe-only engine output: a high-importance anomaly with a real
+        destination gets 'run an investigation' *proposal* — recorded, never
+        executed without an admin decision (best-effort; never breaks analysis)."""
+        try:
+            high = analysis.importance == "high" or analysis.anomaly_likelihood == "high"
+            if not high:
+                return
+            propose_investigation(
+                self.db,
+                alert_id=alert_id,
+                target_ip=alert.get("dest_ip") or alert.get("event_dest_ip"),
+                rationale=(analysis.recommendation or analysis.summary or "")[:400],
+                ref_alert_id=alert_id,
+            )
+        except Exception:
+            log.exception("action proposal hook failed (ignored)")
+
     def _analyze_single(self, row: dict[str, Any]) -> None:
         """Single-alert path (also the fallback for uncovered batch items)."""
         alert = self.db.get_alert(row["alert_id"])
@@ -301,6 +322,7 @@ class AlertAnalysisWorker:
             trace.mark("PERSISTED")
             trace.complete(outcome_summary=f"{analysis.importance}: {analysis.summary}")
             self._failure_streak = 0
+            self._maybe_propose_followup(row["alert_id"], alert, analysis)  # type: ignore[arg-type]
         except LLMUnavailable as exc:
             error = f"{exc.__class__.__name__}: {exc}"
             self.db.fail_alert_analysis(row["alert_id"], error=error)

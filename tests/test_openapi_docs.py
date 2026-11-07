@@ -86,6 +86,9 @@ EXPECTED_ENDPOINTS = {
     ("POST", "/api/admin/v1/ai-questions"),
     ("GET", "/api/admin/v1/ai-questions"),
     ("GET", "/api/admin/v1/ai-questions/{question_id}"),
+    ("GET", "/api/admin/v1/ai-actions"),
+    ("POST", "/api/admin/v1/ai-actions/{action_id}/approve"),
+    ("POST", "/api/admin/v1/ai-actions/{action_id}/reject"),
     ("GET", "/api/admin/v1/audit"),
 }
 

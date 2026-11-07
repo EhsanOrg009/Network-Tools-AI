@@ -412,6 +412,23 @@ CREATE TABLE IF NOT EXISTS ai_questions (
 );
 CREATE INDEX IF NOT EXISTS idx_aiquestions_epoch ON ai_questions(asked_epoch);
 CREATE INDEX IF NOT EXISTS idx_aiquestions_status ON ai_questions(status, asked_epoch);
+
+CREATE TABLE IF NOT EXISTS ai_action_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    rationale TEXT,
+    target_json TEXT,
+    source TEXT NOT NULL DEFAULT 'ai-analysis',
+    status TEXT NOT NULL DEFAULT 'OBSERVED',
+    created_at TEXT NOT NULL,
+    created_epoch REAL NOT NULL,
+    decided_by TEXT,
+    decided_at TEXT,
+    result_json TEXT,
+    dedupe_key TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_aiactions_status ON ai_action_proposals(status, created_epoch);
 """
 
 
@@ -2925,6 +2942,111 @@ class Database:
                 (json.dumps(proposal_ids, ensure_ascii=False), question_id),
             )
             self._conn.commit()
+
+    # -------------------------------------------------------------------------
+    # AI action proposals (v11): observe-first engine output, admin executes
+    # -------------------------------------------------------------------------
+
+    def propose_ai_action(
+        self, *, action_id: str, kind: str, rationale: str | None,
+        target: dict[str, Any] | None, dedupe_key: str,
+        source: str = "ai-analysis",
+    ) -> str | None:
+        """Insert one OBSERVED proposal; duplicate dedupe_key → None (no
+        duplicate nagging). Observe-only: nothing here executes."""
+        now = _now_iso()
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO ai_action_proposals(
+                        action_id, kind, rationale, target_json, source,
+                        status, created_at, created_epoch, dedupe_key
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        action_id, kind, rationale,
+                        json.dumps(target or {}, ensure_ascii=False, default=str),
+                        source, "OBSERVED", now,
+                        datetime.now(timezone.utc).timestamp(), dedupe_key,
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                return None
+        return action_id
+
+    @staticmethod
+    def _action_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        for col, key in ("target_json", "target"), ("result_json", "result"):
+            if d.get(col):
+                try:
+                    d[key] = json.loads(d.pop(col))
+                except (TypeError, ValueError):
+                    d.pop(col, None)
+            else:
+                d.pop(col, None)
+        return d
+
+    def get_ai_action(self, action_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ai_action_proposals WHERE action_id = ?", (action_id,)
+            ).fetchone()
+        return self._action_row_to_dict(row) if row else None
+
+    def list_ai_actions(
+        self, *, status: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        where, params = [], []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM ai_action_proposals {cond}
+                ORDER BY id DESC LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+        return [self._action_row_to_dict(r) for r in rows]
+
+    def decide_ai_action(
+        self, action_id: str, *, decided_by: str, status: str,
+    ) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE ai_action_proposals
+                SET status = ?, decided_by = ?, decided_at = ?
+                WHERE action_id = ? AND status = 'OBSERVED'
+                """,
+                (status, decided_by, _now_iso(), action_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def finish_ai_action(
+        self, action_id: str, *, status: str,
+        result: dict[str, Any] | None = None,
+    ) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE ai_action_proposals SET status = ?, result_json = ?
+                WHERE action_id = ?
+                """,
+                (
+                    status,
+                    json.dumps(result or {}, ensure_ascii=False, default=str),
+                    action_id,
+                ),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
 
     # =========================================================================
     # Endpoint traffic monitoring (v6): per-interface counters + connections

@@ -42,6 +42,7 @@ from netagent.services import console as console_service
 from netagent.services import tasks as task_service
 from netagent.services.agents import agent_public_view
 from netagent.services.discovery import effective_discovery_scope
+from netagent.services.investigations import run_investigation
 from netagent.services.knowledge import ask_question, validate_memory_fields
 
 router = APIRouter(prefix="/api/admin/v1")
@@ -975,6 +976,129 @@ def get_ai_question(
     if record is None:
         raise HTTPException(status_code=404, detail="سؤالی با این شناسه نیست.")
     return record
+
+
+# ---------------------------------------------------------------------------
+# AI action proposals (v11): observe-first, admin decides
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/ai-actions",
+    tags=["پیشنهادهای عملکرد هوشمند"],
+    summary="فهرست پیشنهادهای شِیء-را انجام بده (Observe-Only)",
+    description=(
+        "هر چیزی که موتور هوشمند «انجام بده» می‌خواهد، ابتدا اینجا به‌صورت "
+        "`OBSERVED` ثبت می‌شود و هیچ تغییری در شبکه نمی‌دهد؛ فعال‌سازی فقط با "
+        "تأیید مدیر. حالت پیش‌فرض برابری با Observe Only است."
+    ),
+    responses=_responses(
+        "فهرست پیشنهادها (جدیدترین اول).",
+        {"items": [{
+            "action_id": "actn_11aa22bb33",
+            "kind": "run_investigation",
+            "status": "OBSERVED",
+            "target": {"target_ip": "10.10.0.4"},
+        }]},
+    ),
+)
+def list_ai_actions(
+    request: Request,
+    status: str | None = Query(None, description="فیلتر وضعیت."),
+    limit: int = Query(100, ge=1, le=500, description="حداکثر تعداد ردیف."),
+    offset: int = Query(0, ge=0, description="صفحه‌بندی."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    _guard(request, authorization, x_admin_actor)
+    items = db.list_ai_actions(status=status, limit=limit, offset=offset)
+    return {"items": items}
+
+
+@router.post(
+    "/ai-actions/{action_id}/approve",
+    tags=["پیشنهادهای عملکرد هوشمند"],
+    summary="تأیید و اجرای یک پیشنهاد بررسی",
+    description=(
+        "تنها مسیر OBSERVED → اجرا. برای اقدام جاری اول بررسی هوشمند روی هدف می‌آید؛ "
+        "پیشنهاد با حسابرسی تصمیم مدیر به EXECUTED/FAILED می‌رسد."
+    ),
+    responses=_responses(
+        "پیشنهاد با نتیجه/آی‌دی اجرا.",
+        {"action_id": "actn_11aa22bb33", "status": "EXECUTED",
+         "result": {"investigation_id": 42}},
+        not_found="پیشنهادی با این شناسه نیست.",
+    ),
+)
+def approve_ai_action(
+    request: Request,
+    action_id: str = Path(description="شناسه پیشنهاد."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    action = db.get_ai_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="پیشنهادی با این شناسه نیست.")
+    if action["status"] != "OBSERVED":
+        raise HTTPException(status_code=409, detail="پیشنهاد در وضعیت تأییدپذیر نیست.")
+    if action["kind"] != "run_investigation":
+        raise HTTPException(status_code=422, detail="این نوع پیشنهاد فعلاً قابل اجرا نیست.")
+    target = action.get("target") or {}
+    try:
+        record = run_investigation(
+            db, settings, request.app.state.llm,
+            target_ip=target.get("target_ip"),
+            alert_id=target.get("alert_id"),
+        )
+    except Exception as exc:
+        db.decide_ai_action(action_id, decided_by=actor, status="OBSERVED")
+        db.finish_ai_action(action_id, status="FAILED", result={"error": str(exc)[:300]})
+        db.record_audit(actor=actor, action="action.approve", target=action_id,
+                        detail={"outcome": "FAILED", "error": str(exc)[:200]})
+        raise HTTPException(status_code=502, detail=f"اجرای بررسی ناموفق: {exc}"[:300]) from exc
+    db.decide_ai_action(action_id, decided_by=actor, status="APPROVED")
+    db.finish_ai_action(
+        action_id, status="EXECUTED",
+        result={"investigation_id": record.get("id")},
+    )
+    db.record_audit(actor=actor, action="action.approve", target=action_id,
+                    detail={"outcome": "EXECUTED",
+                            "investigation_id": record.get("id")})
+    return db.get_ai_action(action_id)  # type: ignore[return-value]
+
+
+@router.post(
+    "/ai-actions/{action_id}/reject",
+    tags=["پیشنهادهای عملکرد هوشمند"],
+    summary="رد یک پیشنهاد",
+    description=(
+        "پیشنهاد از `OBSERVED` به `REJECTED` می‌رود و دیگر پیگیری نمی‌شود؛ "
+        "در حسابرسی با تصمیم‌گیرنده ثبت می‌ماند. رکورد حذف نمی‌شود تا بتوان "
+        "بعداً دید موتور چند پیشنهاد بی‌اثر داده است."
+    ),
+    responses=_responses(
+        "پیشنهاد ردشده.",
+        {"action_id": "actn_11aa22bb33", "status": "REJECTED"},
+        not_found="پیشنهادی با این شناسه نیست.",
+    ),
+)
+def reject_ai_action(
+    request: Request,
+    action_id: str = Path(description="شناسه پیشنهاد."),
+    authorization: str | None = Header(default=None, description="هدر `Authorization: Bearer <ADMIN_API_TOKEN>`."),
+    x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر."),
+) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    if not db.get_ai_action(action_id):
+        raise HTTPException(status_code=404, detail="پیشنهادی با این شناسه نیست.")
+    if not db.decide_ai_action(action_id, decided_by=actor, status="REJECTED"):
+        raise HTTPException(status_code=409, detail="پیشنهاد در وضعیت قابل رد نیست.")
+    db.record_audit(actor=actor, action="action.reject", target=action_id)
+    return db.get_ai_action(action_id)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

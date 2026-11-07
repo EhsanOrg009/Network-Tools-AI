@@ -16,6 +16,7 @@ import DiscoveryPage from "./pages/Discovery";
 import SecurityPage from "./pages/Security";
 import InvestigationsPage from "./pages/Investigations";
 import AIActivityPage from "./pages/AIActivity";
+import AIKnowledgePage from "./pages/AIKnowledge";
 import SettingsPage from "./pages/SettingsPage";
 
 const NAV = [
@@ -26,6 +27,7 @@ const NAV = [
   { to: "/dashboard/security", label: "مرکز امنیت", icon: IconShield },
   { to: "/dashboard/investigations", label: "بررسی‌های هوشمند", icon: IconBrain },
   { to: "/dashboard/ai-activity", label: "فعالیت هوش مصنوعی", icon: IconBrain },
+  { to: "/dashboard/ai-knowledge", label: "حافظه‌ی هوشمند", icon: IconBrain },
   { to: "/dashboard/settings", label: "تنظیمات", icon: IconGear },
 ];
 
@@ -50,7 +52,7 @@ function Sidebar() {
       </div>
       <nav>
         <div className="nav-section">عملیات</div>
-        {NAV.slice(0, 6).map(({ to, label, icon: Icon, exact }) => (
+        {NAV.filter((n) => n.to !== "/dashboard/settings").map(({ to, label, icon: Icon, exact }) => (
           <NavLink key={to} to={to} end={exact} className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
             <Icon size={18} />
             <span className="nav-label">{label}</span>
@@ -147,6 +149,7 @@ function ShellInner() {
             <Route path="/dashboard/security" element={<SecurityPage />} />
             <Route path="/dashboard/investigations" element={<InvestigationsPage />} />
             <Route path="/dashboard/ai-activity" element={<AIActivityPage />} />
+            <Route path="/dashboard/ai-knowledge" element={<AIKnowledgePage />} />
             <Route path="/dashboard/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>

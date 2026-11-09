@@ -27,13 +27,71 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from netagent.agent.llm_client import LLMClient, LLMUnavailable
+from netagent.agent.llm_client import (
+    LLMClient,
+    LLMStructuredUnsupported,
+    LLMUnavailable,
+)
 from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import AlertAnalysis
+from pydantic import ValidationError
 from netagent.services.ai_activity import ActivityTrace, traced_chat
 from netagent.services.actions import propose_investigation
 from netagent.services.knowledge import memory_context_block, retrieve_memories
+
+log = logging.getLogger("netagent.ai_analysis")
+
+# Structured Outputs: schemas derived from the real Pydantic model, kept in
+# sync by construction. Backend Pydantic validation still runs after every
+# response — the schema narrows the model's freedom, it replaces nothing.
+_BATCH_ITEM_SCHEMA = (
+    AlertAnalysis.model_json_schema()
+)
+
+
+def _object_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    slim = {k: v for k, v in schema.items() if k != "title"}
+    slim["additionalProperties"] = False
+    return slim
+
+
+ANALYSIS_SCHEMA: dict[str, Any] = _object_schema(_BATCH_ITEM_SCHEMA)
+
+BATCH_SCHEMA: dict[str, Any] = _object_schema({
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": _object_schema({
+                **_BATCH_ITEM_SCHEMA,
+                "properties": {
+                    "alert_id": {"type": "integer"},
+                    **_BATCH_ITEM_SCHEMA["properties"],
+                },
+                "required": [
+                    "alert_id", *_BATCH_ITEM_SCHEMA.get("required", [])
+                ],
+            }),
+        },
+    },
+    "required": ["results"],
+})
+
+# keys that must exist in the model's single-alert JSON before Pydantic runs
+# (missing fields are reported precisely, not as generic "invalid JSON")
+ALERT_REQUIRED_KEYS = tuple(_BATCH_ITEM_SCHEMA.get("required", []))
+
+
+def _pydantic_error_digest(exc: ValidationError) -> list[str]:
+    """Compact, field-precise summary of a schema validation failure."""
+    digests: list[str] = []
+    for err in exc.errors()[:6]:
+        loc = ".".join(str(p) for p in err.get("loc", ())) or "?"
+        kind = err.get("type", "?")
+        digests.append(f"{loc}: {kind}")
+    return digests
+
 
 log = logging.getLogger("netagent.ai_analysis")
 
@@ -149,8 +207,13 @@ def build_batch_analysis_messages(
         '"memories_used": ["..."]}, ...]}\n'
         "اگر بخش «حافظه‌ی تأییدشده» داده شده، دانشِ بازبینیِ مدیر شبکه است؛ محدوده‌ی "
         "اعتبار هر حافظه را رعایت کن و آن‌ها را در memories_used همان هشدار گزارش کن. "
-        "اگر برای هشداری نتیجه‌ی معتبر نداری، آن را از خروجی حذف کن؛ حذف کردن "
-        "درست‌تر از ساختن پاسخ بی‌پایه است. بدون مقدمه، بدون کدبلاک، فقط JSON."
+        "برای هر هشدار با شواهد موجود، جواب قابل ارزیابی بده: اگر شواهد برای نتیجه‌ی "
+        "نهایی کافی نیست، هیچ شواهد ساختگی نساز و نتیجه‌ی قطعی ادا نکن — "
+        "importance/anomaly_likelihood/confidence را از مقادیر مجاز انتخاب کن (مثلاً "
+        "«unknown») و در recommendation صریح بگو چه چیزی نامشخص است. تنها اگر هیچ "
+        "پاسخ معتبری نمی‌توانی بسازی، آن هشدار را حذف کن؛ حذف کردن درست‌تر از ساختن "
+        "پاسخ بی‌پایه است و هشدار حذف‌شده به‌صورت تکی دوباره تحلیل می‌شود. "
+        "بدون مقدمه، بدون کدبلاک، فقط JSON."
     )
     blobs = []
     for alert in sorted(alerts, key=lambda a: a.get("id") or 0):
@@ -181,6 +244,8 @@ class AlertAnalysisWorker:
         self._thread: threading.Thread | None = None
         self._failure_streak = 0
         self._batch_consecutive_failures = 0
+        # structured outputs stay on unless the provider itself rejects them
+        self._structured_outputs_disabled = False
 
     # -- queue maintenance ------------------------------------------------------
 
@@ -260,6 +325,65 @@ class AlertAnalysisWorker:
             analysis.memories_used = filtered
         return analysis
 
+    def _chat_with_structured_fallback(self, call, schema: dict[str, Any], name: str) -> str:
+        """Run the model with a json_schema ``response_format``; if the local
+        provider rejects structured outputs (never timout etc.), remember the
+        rejection and retry the same request once without them."""
+        rf = (
+            {"type": "json_schema", "json_schema": {
+                "name": name, "strict": True, "schema": schema}}
+            if (self.settings.llm_structured_outputs and not self._structured_outputs_disabled)
+            else None
+        )
+        if rf is None:
+            return call(None)
+        try:
+            return call(rf)
+        except LLMStructuredUnsupported:
+            log.warning("provider rejects structured outputs; falling back permanently")
+            self._structured_outputs_disabled = True
+            return call(None)
+
+    def _batch_memory_context(
+        self, alerts: list[dict[str, Any]],
+    ) -> tuple[str, list[str], list[str]]:
+        """Memory context valid for the *whole* batch.
+
+        Only memories whose matching scope fits every member stay in
+        (intersection by memory_id); anything agent/host-specific to some
+        members is excluded rather than leaked to the others. Returns the
+        block text, the sanitized id allow-list and notes for the trace.
+        """
+        per_alert: list[dict[str, dict[str, Any]]] = []
+        for alert in alerts:
+            mems = retrieve_memories(
+                self.db,
+                agent_id=None,
+                ip=alert.get("src_ip") or alert.get("event_src_ip")
+                or alert.get("dest_ip") or alert.get("event_dest_ip"),
+                service=alert.get("app_proto") or alert.get("event_app_proto")
+                or alert.get("proto") or alert.get("event_proto"),
+                keywords=f"{alert.get('signature') or ''} {alert.get('category') or ''}",
+            )
+            per_alert.append({m["memory_id"]: m for m in mems})
+        if not per_alert:
+            return "", [], []
+        common = set(per_alert[0].keys()).intersection(*(m.keys() for m in per_alert[1:]))
+        if not common:
+            return "", [], []
+        mem_map: dict[str, dict[str, Any]] = {}
+        for ids in per_alert:
+            mem_map.update(ids)
+        common_ordered = sorted(common)
+        block = memory_context_block(
+            [mem_map[i] for i in common_ordered],
+        )
+        notes = [
+            "memory: فقط دانشِ هم‌محدوده با همه‌ی اعضای گروه تزریق شد "
+            f"({len(common_ordered)} رکورد)"
+        ]
+        return block, common_ordered, notes
+
     def _maybe_propose_followup(
         self, alert_id: int, alert: dict[str, Any], analysis: Any,
     ) -> None:
@@ -303,13 +427,28 @@ class AlertAnalysisWorker:
                 })
             ))
         try:
-            text = traced_chat(
-                self.llm, build_analysis_messages(alert, memories_text), trace=trace
+            text = self._chat_with_structured_fallback(
+                lambda rf: traced_chat(
+                    self.llm, build_analysis_messages(alert, memories_text),
+                    trace=trace, response_format=rf,
+                ),
+                ANALYSIS_SCHEMA, "alert_analysis",
             )
             data = LLMClient.extract_json(text)
-            if data is None or not any(k in (data or {}) for k in ("summary", "importance")):
-                raise ValueError("model output was not valid JSON")
-            analysis = AlertAnalysis.model_validate(data)  # raises on bad shape
+            if data is None:
+                raise ValueError("invalid_json: خروجی مدل قابل تجزیه به JSON نبود")
+            missing = [k for k in ALERT_REQUIRED_KEYS if k not in data]
+            if missing:
+                raise ValueError(
+                    "missing_required_fields: " + ", ".join(missing)
+                )
+            try:
+                analysis = AlertAnalysis.model_validate(data)
+            except ValidationError as exc:
+                raise ValueError(
+                    "schema_validation_failed: "
+                    + "; ".join(_pydantic_error_digest(exc))
+                ) from exc
             analysis = self._sanitize_memories_used(analysis, allowed_mem_ids)  # type: ignore[arg-type]
             self.db.complete_alert_analysis(
                 row["alert_id"],
@@ -384,33 +523,55 @@ class AlertAnalysisWorker:
         )
         trace.mark("CONTEXT_PREPARED")
 
-        memories_text, allowed_mem_ids = self._memory_context_for(alerts[0])
+        # memory scope: only knowledge that legitimately matches EVERY member
+        # of the group is injected — an agent- or host-scoped memory that fits
+        # alerts[0] must never leak into the analysis of another alert
+        memories_text, allowed_mem_ids, batch_mem_notes = self._batch_memory_context(alerts)
 
         try:
-            text = traced_chat(
-                self.llm, build_batch_analysis_messages(alerts, memories_text=memories_text),
-                trace=trace,
+            text = self._chat_with_structured_fallback(
+                lambda rf: traced_chat(
+                    self.llm,
+                    build_batch_analysis_messages(alerts, memories_text=memories_text),
+                    trace=trace, response_format=rf,
+                ),
+                BATCH_SCHEMA, "alert_analysis_batch",
             )
             data = LLMClient.extract_json(text) or {}
             results = data.get("results")
             if not isinstance(results, list):
-                raise ValueError("batch output was not a valid results list")
+                raise ValueError("batch_results_missing: output has no 'results' array")
             done_ids: set[int] = set()
+            seen_ids: set[int] = set()
+            notes: list[str] = list(batch_mem_notes)
             for item in results:
                 if not isinstance(item, dict):
+                    notes.append("batch_invalid_item: آیتم غیرشیء حذف شد")
                     continue
                 alert_id = item.get("alert_id")
-                if not isinstance(alert_id, int) or alert_id not in rows_by_id:
-                    continue  # never attribute a result across alerts/devices
+                if not isinstance(alert_id, int):
+                    notes.append("batch_invalid_item: alert_id عدد صحیح نیست")
+                    continue
+                if alert_id not in rows_by_id:
+                    # never attribute a result across alerts/devices
+                    notes.append("batch_unknown_alert_id: به هشدارهای این گروه تعلق ندارد")
+                    continue
+                if alert_id in seen_ids:
+                    notes.append("batch_duplicate_alert_id: نتیجه تکراری نادیده گرفته شد")
+                    continue
                 item = dict(item)
                 item.pop("alert_id", None)
                 if "summary" not in item:
+                    notes.append(f"هشدار #{alert_id}: آیتم ناقص (بدون summary)")
                     continue
                 try:
                     analysis = AlertAnalysis.model_validate(item)
                     analysis = self._sanitize_memories_used(analysis, allowed_mem_ids)  # type: ignore[arg-type]
-                except Exception:
-                    continue  # uncovered alert → individual pass below
+                except ValidationError as exc:
+                    notes.append(
+                        f"schema_validation_failed (#{alert_id}): {exc.error_count()} ایراد؛ ارجاع به تکی"
+                    )
+                    continue
                 self.db.complete_alert_analysis(
                     alert_id,
                     analysis=analysis.model_dump(),
@@ -419,11 +580,14 @@ class AlertAnalysisWorker:
                     duration_ms=self._duration_ms(rows_by_id[alert_id]),
                     memories_used=analysis.memories_used,  # type: ignore[union-attr]
                 )
+                seen_ids.add(alert_id)
                 done_ids.add(alert_id)
             self._failure_streak = 0
+            note_tail = (f"؛ ملاحظات: {' | '.join(notes[:4])}" if notes else "")
             trace.complete(outcome_summary=(
                 f"تحلیل گروهی: {len(done_ids)} نتیجه مستقل از {len(alerts)} "
                 f"هشدار؛ {len(rows_by_id) - len(done_ids)} مورد به تکی ارجاع شد."
+                + note_tail
             ))
         except LLMUnavailable as exc:
             error = f"{exc.__class__.__name__}: {exc}"

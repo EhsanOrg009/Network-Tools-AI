@@ -23,7 +23,7 @@ import time
 import uuid
 from typing import Any
 
-from netagent.agent.llm_client import LLMClient, LLMStreamEmpty
+from netagent.agent.llm_client import LLMClient, LLMStreamEmpty, LLMTruncated
 from netagent.database import Database
 
 log = logging.getLogger("netagent.ai_activity")
@@ -160,6 +160,11 @@ def traced_chat(
             )
         except LLMStreamEmpty:
             log.info("model produced no stream content; falling back")
+        except LLMTruncated:
+            # the *real* termination signal still belongs in the trace even
+            # though the answer cannot be used
+            _record_stream_meta(llm, trace)
+            raise
         else:
             finish_captured = {
                 "finish_reason": llm.last_finish_reason,
@@ -169,11 +174,25 @@ def traced_chat(
             trace.stream_finished(**finish_captured)
             trace.mark("RESPONSE_RECEIVED")
             return text
-        text = llm.chat(messages, max_tokens=max_tokens)
+        try:
+            text = llm.chat(messages, max_tokens=max_tokens)
+            _record_stream_meta(llm, trace)
+        except LLMTruncated:
+            _record_stream_meta(llm, trace)
+            raise
     else:
         text = llm.chat(messages)
     trace.mark("RESPONSE_RECEIVED")
     return text
+
+
+def _record_stream_meta(llm: Any, trace: ActivityTrace) -> None:
+    """Store the provider's real termination info (finish_reason/usage) once."""
+    trace.stream_finished(
+        finish_reason=getattr(llm, "last_finish_reason", None),
+        prompt_tokens=_token_count(getattr(llm, "last_usage", None), "prompt_tokens"),
+        completion_tokens=_token_count(getattr(llm, "last_usage", None), "completion_tokens"),
+    )
 
 
 def _provider(llm: Any) -> str | None:

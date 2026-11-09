@@ -12,7 +12,9 @@ from unittest.mock import patch
 
 import pytest
 
-from netagent.agent.llm_client import LLMClient, LLMStreamEmpty, LLMUnavailable
+from netagent.agent.llm_client import (
+    LLMClient, LLMStreamEmpty, LLMTruncated, LLMUnavailable,
+)
 from netagent.services.ai_activity import ActivityTrace, traced_chat
 from netagent.services.ai_analysis import AlertAnalysisWorker, PROMPT_VERSION
 from tests.test_ai_analysis import _seed_alert, FakeLLM
@@ -224,6 +226,33 @@ def test_traced_chat_plain_client_without_stream(db):
     assert out.startswith("{")
     row = db.get_ai_activity(trace.request_id)
     assert row["status"] == "RUNNING"  # caller still closes it
+
+
+def test_traced_chat_records_truncated_stream_finish_in_trace(db):
+    """A truncated answer (finish_reason=length) can never be used, but its
+    *real* termination signal must still appear in the activity trace."""
+    trace = ActivityTrace(db, task_type="t", model="fake")
+    client = LLMClient.__new__(LLMClient)  # skip __init__ wiring
+    from netagent.config import Settings
+    s = Settings()
+    s.llm_max_output_tokens = 8
+    client._settings = s
+    client.model = "fake"
+    client.last_finish_reason = None
+    client.last_usage = None
+    client._client = StreamFakeClient(iter([
+        _chunk(None), _chunk("نصف "), _chunk("پاسخ"), _chunk(None, "length"),
+    ]))
+    with pytest.raises(LLMTruncated):
+        traced_chat(client, [{"role": "user", "content": "q"}], trace=trace)
+    row = db.get_ai_activity(trace.request_id)
+    stages = [e["stage"] for e in row["timeline"]]
+    assert stages == [
+        "REQUEST_CREATED", "SENT_TO_LLM", "FIRST_TOKEN_RECEIVED",
+        "STREAM_FINISHED",
+    ]
+    finish = row["timeline"][-1]
+    assert finish["finish_reason"] == "length"  # never synthesized
 
 
 # -- worker integration --------------------------------------------------------

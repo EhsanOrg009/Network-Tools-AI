@@ -32,7 +32,7 @@ interface ActivityRow {
   final_at: string | null;
   duration_ms: number | null;
   streaming: number | null;
-  timeline?: { stage: string; at: string }[];
+  timeline?: TimelineEntry[];
 }
 
 interface Summary {
@@ -57,13 +57,21 @@ const STAGE_LABEL: Record<string, string> = {
   REQUEST_CREATED: "ساخت رکورد",
   QUEUED: "در صف ارسال",
   CONTEXT_PREPARED: "آماده‌سازی زمینه",
-  SENT_TO_LLM: "ارسال به Msty",
+  SENT_TO_LLM: "ارسال به مدل (LLM)",
   FIRST_TOKEN_RECEIVED: "دریافت اولین توکن",
   GENERATING: "تولید پاسخ",
   TOOL_REQUESTED: "درخواست ابزار",
   TOOL_COMPLETED: "اجرای ابزار",
   RESPONSE_RECEIVED: "دریافت پاسخ",
   PERSISTED: "ذخیره نتیجه",
+  STREAM_FINISHED: "پایان جریان پاسخ",
+};
+
+const FINISH_LABEL: Record<string, string> = {
+  stop: "پایان کامل (stop)",
+  length: "بریده‌شده به‌دلیل محدودیت توکن",
+  timeout: "پایان مهلت",
+  content_filter: "فیلتر محتوا",
 };
 
 const STATUS_TONE: Record<string, string> = {
@@ -84,6 +92,32 @@ function fmtMs(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
   if (ms < 1000) return `${faNum(Math.round(ms))} میلی‌ثانیه`;
   return `${faNum(Math.round(ms / 100) / 10)} ثانیه`;
+}
+
+interface TimelineEntry {
+  stage: string;
+  at: string;
+  provider?: string;
+  model?: string;
+  finish_reason?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  first_token_ms?: number;
+  streaming?: boolean;
+}
+
+function entryExtras(e: TimelineEntry): string {
+  const bits: string[] = [];
+  if (e.provider && e.stage === "SENT_TO_LLM") bits.push(`provider: ${e.provider}`);
+  if (e.model && e.stage === "SENT_TO_LLM") bits.push(`model: ${e.model}`);
+  if (e.finish_reason) {
+    bits.push(`finish_reason: ${FINISH_LABEL[e.finish_reason] ?? e.finish_reason}`);
+  }
+  if (e.prompt_tokens !== undefined) bits.push(`توکن ورودی: ${faNum(e.prompt_tokens)}`);
+  if (e.completion_tokens !== undefined) {
+    bits.push(`توکن خروجی: ${faNum(e.completion_tokens)}`);
+  }
+  return bits.join(" · ");
 }
 
 /* ---- summary strip ------------------------------------------------------ */
@@ -166,12 +200,16 @@ function TimelineDetail({ requestId }: { requestId: string }) {
         <div className="small muted">خط زمانی ثبت نشده است.</div>
       ) : (
         <ol style={{ margin: 0, paddingInlineStart: 18 }}>
-          {timeline.map((e, i) => (
-            <li key={i} className="small">
-              <b>{STAGE_LABEL[e.stage] ?? e.stage}</b>
-              <span className="muted"> — {fmtDateTime(e.at)}</span>
-            </li>
-          ))}
+          {timeline.map((e, i) => {
+            const extras = entryExtras(e);
+            return (
+              <li key={i} className="small">
+                <b>{STAGE_LABEL[e.stage] ?? e.stage}</b>
+                <span className="muted"> — {fmtDateTime(e.at)}</span>
+                {extras && <div className="technical muted" style={{ fontSize: 11 }}>{extras}</div>}
+              </li>
+            );
+          })}
         </ol>
       )}
       {row.context_summary && (

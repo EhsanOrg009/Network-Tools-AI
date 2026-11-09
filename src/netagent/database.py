@@ -444,6 +444,11 @@ _ADDITIVE_MIGRATIONS = (
     "ALTER TABLE alert_analyses ADD COLUMN duration_ms REAL",
     "ALTER TABLE alert_analyses ADD COLUMN memories_json TEXT",
     "CREATE INDEX IF NOT EXISTS idx_alertanal_prio ON alert_analyses(status, priority, alert_id)",
+    # v11+: real completion metadata in the AI Activity Monitor
+    "ALTER TABLE ai_activity ADD COLUMN provider TEXT",
+    "ALTER TABLE ai_activity ADD COLUMN finish_reason TEXT",
+    "ALTER TABLE ai_activity ADD COLUMN prompt_tokens INTEGER",
+    "ALTER TABLE ai_activity ADD COLUMN completion_tokens INTEGER",
 )
 
 
@@ -2358,7 +2363,7 @@ class Database:
     AI_ACTIVITY_STAGES = (
         "REQUEST_CREATED", "QUEUED", "CONTEXT_PREPARED", "SENT_TO_LLM",
         "FIRST_TOKEN_RECEIVED", "GENERATING", "TOOL_REQUESTED",
-        "TOOL_COMPLETED", "RESPONSE_RECEIVED", "PERSISTED",
+        "TOOL_COMPLETED", "RESPONSE_RECEIVED", "PERSISTED", "STREAM_FINISHED",
     )
 
     def create_ai_activity(
@@ -2399,8 +2404,15 @@ class Database:
         context_summary: str | None = None,
         first_token_ms: float | None = None,
         streaming: bool | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        finish_reason: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
     ) -> None:
-        """Append a *real* milestone to the timeline (idempotent-safe)."""
+        """Append a *real* milestone to the timeline (idempotent-safe).
+        Extra real metadata (provider/model, finish reason, token usage) is
+        stored both in the timeline entry and in dedicated columns."""
         if stage not in self.AI_ACTIVITY_STAGES:
             raise ValueError(f"unknown activity stage: {stage}")
         now = _now_iso()
@@ -2416,6 +2428,39 @@ class Database:
             except (TypeError, ValueError):
                 timeline = []
             entry: dict[str, Any] = {"stage": stage, "at": now}
+            if provider:
+                entry["provider"] = provider
+            if model:
+                entry["model"] = model
+            if finish_reason:
+                entry["finish_reason"] = finish_reason
+            if prompt_tokens is not None:
+                entry["prompt_tokens"] = prompt_tokens
+            if completion_tokens is not None:
+                entry["completion_tokens"] = completion_tokens
+            if first_token_ms is not None:
+                entry["first_token_ms"] = first_token_ms
+            if streaming is not None:
+                entry["streaming"] = streaming
+            if stage == "SENT_TO_LLM" and (provider or model):
+                self._conn.execute(
+                    "UPDATE ai_activity SET provider = COALESCE(?, provider), "
+                    "model = COALESCE(?, model) WHERE request_id = ?",
+                    (provider, model, request_id),
+                )
+            if stage in ("STREAM_FINISHED", "RESPONSE_RECEIVED") and (
+                finish_reason or prompt_tokens is not None or completion_tokens is not None
+            ):
+                self._conn.execute(
+                    """
+                    UPDATE ai_activity SET
+                        finish_reason = COALESCE(?, finish_reason),
+                        prompt_tokens = COALESCE(?, prompt_tokens),
+                        completion_tokens = COALESCE(?, completion_tokens)
+                    WHERE request_id = ?
+                    """,
+                    (finish_reason, prompt_tokens, completion_tokens, request_id),
+                )
             if stage == "SENT_TO_LLM":
                 self._conn.execute(
                     "UPDATE ai_activity SET sent_at = ? WHERE request_id = ?",

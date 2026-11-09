@@ -179,7 +179,7 @@ _SETTINGS_WHITELIST = (
     "monitor_cidrs", "authorized_targets", "monitor_interface",
     "enable_monitor", "monitor_interval_seconds",
     "suricata_eve_path",
-    "llm_enabled", "msty_base_url", "msty_model",
+    "llm_enabled", "llm_base_url", "llm_model", "llm_provider",
     "allow_auto_registration", "enrollment_request_ttl_minutes",
     "max_pending_enrollment_requests", "registration_rate_limit_per_hour",
     "agent_heartbeat_interval_seconds", "agent_heartbeat_timeout_seconds",

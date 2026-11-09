@@ -14,7 +14,7 @@ def _llm_reachable(settings: Settings) -> tuple[bool, str]:
     """TCP-level check of the LLM endpoint; sends no model request."""
     try:
         from urllib.parse import urlparse
-        parsed = urlparse(settings.msty_base_url)
+        parsed = urlparse(settings.llm_base_url)
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         with socket.create_connection((host, port), timeout=2.0):
@@ -67,8 +67,8 @@ def build_health(
         "llm": {
             "ok": llm_ok,
             "detail": llm_detail,
-            "base_url": settings.msty_base_url,
-            "model": settings.msty_model,
+            "base_url": settings.llm_base_url,
+            "model": settings.llm_model,
         },
         "monitor_thread": {"ok": True, "running": monitor_running},
         "endpoint_agents": {

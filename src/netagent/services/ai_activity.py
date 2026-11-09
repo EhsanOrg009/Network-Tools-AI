@@ -63,9 +63,22 @@ class ActivityTrace:
         except Exception:  # pragma: no cover - observability must not hurt
             log.exception("failed to record activity stage")
 
-    def sent(self) -> None:
+    def sent(self, *, provider: str | None = None, model: str | None = None) -> None:
         """Recorded immediately before the request is handed over."""
-        self.mark("SENT_TO_LLM")
+        self.mark("SENT_TO_LLM", provider=provider, model=model)
+
+    def stream_finished(
+        self, *, finish_reason: str | None = None,
+        prompt_tokens: int | None = None, completion_tokens: int | None = None,
+    ) -> None:
+        """Real stream termination info (finish_reason / token usage) as
+        provided by the provider; never synthesized."""
+        self.mark(
+            "STREAM_FINISHED",
+            finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
 
     def first_token(self, first_token_ms: float, streaming: bool) -> None:
         self.mark(
@@ -110,6 +123,7 @@ def traced_chat(
     *,
     trace: ActivityTrace | None = None,
     max_tokens: int | None = None,
+    response_format: dict | None = None,
 ) -> str:
     """Chat call used by background workers and the orchestrator.
 
@@ -118,13 +132,19 @@ def traced_chat(
       a model emits nothing over the stream, e.g. reasoning-only models).
     - ``LLMClient`` without trace → plain non-streaming call (unchanged).
     - Any user-provided client (tests/fakes) → call its ``chat`` directly.
+    ``response_format`` (Structured Outputs) is passed through to LLMClient
+    and ignored by plain fakes.
     """
     if trace is None:
+        if isinstance(llm, LLMClient):
+            return llm.chat(messages, max_tokens=max_tokens,
+                            response_format=response_format)
         return llm.chat(messages)
 
-    trace.sent()
+    trace.sent(provider=_provider(llm), model=_model_name(llm))
     started = time.monotonic()
     first_token_logged = False
+    finish_captured: dict = {}
 
     def _hook() -> None:
         nonlocal first_token_logged
@@ -134,13 +154,41 @@ def traced_chat(
 
     if isinstance(llm, LLMClient):
         try:
-            return llm.chat_stream(
-                messages, max_tokens=max_tokens, first_token_cb=_hook
+            text = llm.chat_stream(
+                messages, max_tokens=max_tokens, first_token_cb=_hook,
+                response_format=response_format,
             )
         except LLMStreamEmpty:
             log.info("model produced no stream content; falling back")
+        else:
+            finish_captured = {
+                "finish_reason": llm.last_finish_reason,
+                "prompt_tokens": _token_count(llm.last_usage, "prompt_tokens"),
+                "completion_tokens": _token_count(llm.last_usage, "completion_tokens"),
+            }
+            trace.stream_finished(**finish_captured)
+            trace.mark("RESPONSE_RECEIVED")
+            return text
         text = llm.chat(messages, max_tokens=max_tokens)
     else:
         text = llm.chat(messages)
     trace.mark("RESPONSE_RECEIVED")
     return text
+
+
+def _provider(llm: Any) -> str | None:
+    provider = getattr(getattr(llm, "settings", None), "llm_provider", None)
+    return str(provider) if provider else None
+
+
+def _model_name(llm: Any) -> str | None:
+    model = getattr(llm, "model", None)
+    return str(model) if model else None
+
+
+def _token_count(usage: Any, field: str) -> int | None:
+    value = getattr(usage, field, None) if usage is not None else None
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

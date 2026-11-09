@@ -155,18 +155,20 @@ class StreamFakeClient:
         return iter(self._chunks)
 
 
-def _chunk(content=None):
+def _chunk(content=None, finish=None):
     class C:
-        def __init__(self, content):
+        def __init__(self, content, finish):
             class _D:
                 def __init__(self, c):
                     self.content = c
-            self.choices = [type("S", (), {"delta": _D(content)})()]
-    return C(content)
+            delta = _D(content)
+            finish_reason = finish
+            self.choices = [type("S", (), {"delta": delta, "finish_reason": finish_reason})()]
+    return C(content, finish)
 
 
 def test_chat_stream_collections_of_deltas_with_first_token():
-    chunks = iter([_chunk(None), _chunk("سلام "), _chunk("دنیا")])
+    chunks = iter([_chunk(None), _chunk("سلام "), _chunk("دنیا"), _chunk(None, "stop")])
     client = LLMClient.__new__(LLMClient)  # skip __init__ wiring
     from netagent.config import Settings
     s = Settings()
@@ -178,11 +180,18 @@ def test_chat_stream_collections_of_deltas_with_first_token():
         [{"role": "user", "content": "x"}], first_token_cb=lambda: calls.append(1)
     )
     assert text == "سلام دنیا"
+    assert client.last_finish_reason == "stop"
     assert calls == [1]
+    # an unterminated stream (disconnect) is an error, not a complete answer
+    client_broken = LLMClient.__new__(LLMClient)
+    client_broken._settings = s
+    client_broken._client = StreamFakeClient(iter([_chunk(None), _chunk("نصف")]))
+    with pytest.raises(LLMUnavailable):
+        client_broken.chat_stream([{"role": "user", "content": "x"}])
     # reasoning-only model → empty stream signals fallback, not success
     client2 = LLMClient.__new__(LLMClient)
     client2._settings = s
-    client2._client = StreamFakeClient(iter([_chunk(None)]))
+    client2._client = StreamFakeClient(iter([_chunk(None), _chunk(None, "stop")]))
     with pytest.raises(LLMStreamEmpty):
         client2.chat_stream([{"role": "user", "content": "x"}])
 

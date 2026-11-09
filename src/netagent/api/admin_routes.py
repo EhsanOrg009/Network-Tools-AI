@@ -558,7 +558,7 @@ def ai_activity_summary(
     summary["queue"] = {
         "alert_analysis_pending_and_running": db.pending_alert_analysis_count(),
     }
-    summary["model"] = settings.msty_model if settings.llm_enabled else None
+    summary["model"] = settings.llm_model if settings.llm_enabled else None
     summary["llm_enabled"] = settings.llm_enabled
     return summary
 

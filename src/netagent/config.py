@@ -20,7 +20,7 @@ import ipaddress
 import shutil
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # --- HTTP server ---
@@ -53,14 +54,29 @@ class Settings(BaseSettings):
     suricata_eve_path: Path = Path("/var/log/suricata/eve.json")
     monitor_interface: str = "wlo1"
 
-    # --- Local LLM (Msty / OpenAI-compatible) ---
-    msty_base_url: str = "http://127.0.0.1:11964/v1"
-    msty_api_key: str = "not-needed"
-    msty_model: str = "gemma-4-e2b-it-q4_0--2-:latest"
+    # --- Local LLM (OpenAI-compatible: Ollama / Msty) ---
+    # Default provider is Ollama; Msty users set MSTY_* envs (accepted as
+    # aliases) to keep their existing setup working unchanged.
+    llm_provider: str = "ollama"
+    llm_base_url: str = Field(
+        default="http://127.0.0.1:11434/v1",
+        validation_alias=AliasChoices("LLM_BASE_URL", "MSTY_BASE_URL"),
+    )
+    llm_api_key: str = Field(
+        default="ollama",
+        validation_alias=AliasChoices("LLM_API_KEY", "MSTY_API_KEY"),
+    )
+    llm_model: str = Field(
+        default="gemma4-local:latest",
+        validation_alias=AliasChoices("LLM_MODEL", "MSTY_MODEL"),
+    )
     llm_timeout_seconds: float = 180.0
     llm_max_output_tokens: int = 4096
     llm_max_input_chars: int = 12000
     llm_temperature: float = 0.2
+    # Structured Outputs (Ollama json_schema response_format) keep the model
+    # honest — parsing/Pydantic validation still runs in the backend.
+    llm_structured_outputs: bool = True
     # When false, investigations produce a deterministic fallback report
     # without contacting the LLM at all.
     llm_enabled: bool = True

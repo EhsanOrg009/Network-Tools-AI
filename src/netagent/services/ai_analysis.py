@@ -428,7 +428,7 @@ class AlertAnalysisWorker:
                 ),
                 ANALYSIS_SCHEMA, "alert_analysis",
             )
-            data = LLMClient.extract_json(text)
+            data = LLMClient.extract_complete_json(text)
             if data is None:
                 raise ValueError("invalid_json: خروجی مدل قابل تجزیه به JSON نبود")
             missing = [k for k in ALERT_REQUIRED_KEYS if k not in data]
@@ -542,7 +542,7 @@ class AlertAnalysisWorker:
                 ),
                 BATCH_SCHEMA, "alert_analysis_batch",
             )
-            data = LLMClient.extract_json(text) or {}
+            data = LLMClient.extract_complete_json(text) or {}
             results = data.get("results")
             if not isinstance(results, list):
                 raise ValueError("batch_results_missing: output has no 'results' array")
@@ -604,6 +604,7 @@ class AlertAnalysisWorker:
         except Exception as exc:
             batch_mode_broken = self._batch_consecutive_failures >= 2
             self._batch_consecutive_failures += 1
+            self._failure_streak = min(self._failure_streak + 1, 10)
             if batch_mode_broken:
                 # batching itself is failing (e.g. the model cannot follow the
                 # shape) → analyze every group member individually instead

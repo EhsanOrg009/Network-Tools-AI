@@ -233,6 +233,8 @@ class LLMClient:
             raise LLMTruncated(
                 "output truncated by the token limit (finish_reason=length)"
             )
+        if finish is None:
+            raise LLMUnavailable("LLM response has no finish signal")
         if not content:
             raise LLMUnavailable("LLM returned an empty response")
         return content
@@ -343,6 +345,18 @@ class LLMClient:
             self.last_usage = None
 
     # -- JSON extraction ------------------------------------------------------
+
+    @staticmethod
+    def extract_complete_json(text: str) -> dict | None:
+        """Decode an intact object for analysis; never repair incomplete JSON."""
+        start = text.find("{")
+        if start < 0:
+            return None
+        try:
+            value, _ = json.JSONDecoder().raw_decode(text[start:])
+        except (ValueError, TypeError):
+            return None
+        return value if isinstance(value, dict) else None
 
     @staticmethod
     def extract_json(text: str) -> dict | None:

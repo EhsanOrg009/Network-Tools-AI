@@ -353,3 +353,14 @@ def test_pending_intake_survives_restart_and_keeps_job_id(db, settings):
         assert other.get_alert_analysis(aid)["status"] == "COMPLETED"
     finally:
         other.close()
+
+
+def test_partial_json_with_complete_fields_is_not_successfully_repaired(db, settings):
+    aid = ingest(db)
+    request(db, aid)
+    class Partial(FakeLLM):
+        def chat(self, messages):
+            return super().chat(messages)[:-1]
+    assert AlertAnalysisWorker(db, settings, Partial()).process_one()
+    row = db.get_alert_analysis(aid)
+    assert row["status"] == "FAILED" and "invalid_json" in row["error"]

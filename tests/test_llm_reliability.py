@@ -6,7 +6,7 @@ import httpx
 import pytest
 from openai import APITimeoutError
 
-from netagent.agent.llm_client import LLMClient, LLMBusy, LLMTimeout, LLMStructuredUnsupported
+from netagent.agent.llm_client import LLMClient, LLMBusy, LLMTimeout, LLMStructuredUnsupported, LLMUnavailable
 from netagent.services.ai_analysis import AlertAnalysisWorker, ANALYSIS_SCHEMA
 
 
@@ -84,3 +84,17 @@ def test_structured_rejection_does_not_disable_schema(settings, db):
         worker._chat_with_structured_fallback(call, ANALYSIS_SCHEMA, 'analysis')
     assert call.call_count == 1
     assert call.call_args.args[0]['type'] == 'json_schema'
+
+
+def test_nonstream_response_requires_completion_signal(settings):
+    client = LLMClient(settings)
+    response = completion()
+    response.choices[0].finish_reason = None
+    client._client.chat.completions.create = Mock(return_value=response)
+    with pytest.raises(LLMUnavailable, match='finish signal'):
+        client.chat([])
+
+
+def test_complete_analysis_parser_does_not_repair_partial_object():
+    assert LLMClient.extract_complete_json('{"summary":"partial"') is None
+    assert LLMClient.extract_complete_json('```json\n{"summary":"complete"}\n```') == {'summary': 'complete'}

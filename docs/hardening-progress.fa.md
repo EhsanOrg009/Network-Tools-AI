@@ -23,3 +23,13 @@ DNS فقط برای عملیات تک‌میزبان resolve می‌شود؛ ت�
 فرمان: `uv run pytest tests/test_scope_enforcement.py tests/test_tool_validation.py tests/test_nmap_tools.py tests/test_agent_loop.py tests/test_fingerprint.py tests/test_api.py tests/test_discovery_policy.py -q`
 
 نتیجه: **۱۵۲ موفق** در ۲٫۰۵ ثانیه. ۳۱ آزمون جدید شامل عدم اجرای شبکه در حالت رد مجوز، چند پاسخ DNS، IPv6 و مسیر واقعی Orchestrator با مدل جعلی است. تست TCP واقعی فقط loopback با مجوز صریح دارد؛ سایر عملیات شبکه mock هستند. اصلاح شمارش Ping و فرمان IPv6 Nmap طبق ترتیب مأموریت در فاز ۷ انجام می‌شود.
+
+## فاز ۳ — ماندگاری Suricata
+
+اصلاح و آزموده شد: Reader تا acknowledgment همان batch را نگه می‌دارد؛ Monitor رویداد، alert، host و cursor را در یک تراکنش می‌نویسد و فقط پس از commit تأیید می‌کند. خطای event/alert/cursor/commit کل batch را rollback می‌کند. `store_event` در خارج Monitor نیز اتمیک است. duplicate صرفاً با تضاد dedupe_key تشخیص داده می‌شود، نه با پنهان‌کردن تمام خطاهای IntegrityError.
+
+restart از offset ذخیره‌شده است. هنگام rotation، descriptor قبلی ابتدا تخلیه می‌شود؛ در restart فایل هم‌خانوادهٔ EVE با inode/device قبلی جست‌وجو می‌شود. truncation کوتاه و truncation با رشد مجدد از طریق anchor نزدیک cursor تشخیص داده می‌شود. خط ناقص تا کامل‌شدن خوانده نمی‌شود. اگر فایل چرخیده دیگر قابل بازیابی نباشد، هشدار در log، meta و health باقی می‌ماند؛ دادهٔ فایلی که پیش از خواندن حذف شده قابل تضمین نیست. تضمین ingestion، **at-least-once همراه deduplication** است؛ ادعای exactly-once وجود ندارد.
+
+Schema جدید لازم نبود؛ cursor قبلی با فیلدهای inode/offset همچنان خوانده می‌شود و device/anchor به JSON بعدی افزوده می‌شوند. تنظیم WAL تغییر نکرد. commitهای helperهای دیتابیس داخل تراکنش مشترک به تعویق می‌افتند؛ رفتار مستقل آن‌ها حفظ شده است.
+
+آزمون هدفمند نخست: **۶۱ موفق**. سپس آزمون شکست commit و مرگ واقعی فرایند قبل commit اضافه شد. رگرسیون کامل `uv run pytest -q`: **۳۹۱ موفق، ۴ skipped** در ۷۵٫۵۴ ثانیه. آزمون‌های افزوده شامل append هنگام خاموشی، restart پس از شکست ذخیره، rotation در حالت روشن/خاموش، partial line، dedupe و rollback فرایند کشته‌شده‌اند.

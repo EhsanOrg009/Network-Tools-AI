@@ -53,16 +53,14 @@ class Monitor:
         self.duplicates_skipped: int = 0
         self.malformed_skipped: int = 0
         self.rotations: int = 0
+        self.recovery_warning = db.get_meta("eve_recovery_warning")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     # -- state persistence -----------------------------------------------------
 
-    def _persist_state(self, state: dict[str, int]) -> None:
-        try:
-            self.db.set_meta(META_KEY, json.dumps(state))
-        except Exception:  # pragma: no cover
-            pass
+    def _persist_state(self, state: dict[str, Any]) -> None:
+        self.db.set_meta(META_KEY, json.dumps(state))
 
     # -- polling ---------------------------------------------------------------
 
@@ -77,27 +75,37 @@ class Monitor:
             return {"ok": False, "error": str(exc)}
 
         ingested = 0
-        for ev in result.events:
-            raw = json.dumps(ev.payload, ensure_ascii=False, separators=(",", ":"))
-            try:
-                event_id = store_event(self.db, ev, raw)
-            except Exception as exc:  # defensive: one bad event must not stop ingest
-                self.last_error = f"store failed: {exc.__class__.__name__}"
-                log.exception("failed to store event")
-                continue
-            if event_id is None:
-                self.duplicates_skipped += 1
-            else:
-                ingested += 1
+        duplicates = 0
+        try:
+            with self.db.transaction():
+                for ev in result.events:
+                    raw = json.dumps(ev.payload, ensure_ascii=False, separators=(",", ":"))
+                    event_id = store_event(self.db, ev, raw)
+                    if event_id is None:
+                        duplicates += 1
+                    else:
+                        ingested += 1
+                self._persist_state(result.cursor)
+                if result.recovery_warning:
+                    self.db.set_meta("eve_recovery_warning", result.recovery_warning)
+            self.tailer.acknowledge(persist=False)
+        except Exception as exc:
+            self.last_error = f"store failed: {exc.__class__.__name__}"
+            self.consecutive_errors += 1
+            log.exception("EVE batch rolled back; cursor retained for retry")
+            return {"ok": False, "error": self.last_error, "ingested": 0}
+        self.duplicates_skipped += duplicates
         self.events_ingested += ingested
         self.malformed_skipped += result.malformed
         if result.rotated:
             self.rotations += 1
             log.info("eve.json rotated; restarted from beginning")
         self.last_poll_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        if result.events:
-            self.last_error = None
-            self.consecutive_errors = 0
+        self.last_error = result.recovery_warning
+        self.consecutive_errors = 0
+        if result.recovery_warning:
+            self.recovery_warning = result.recovery_warning
+            log.warning("%s", result.recovery_warning)
         return {
             "ok": True,
             "ingested": ingested,
@@ -152,6 +160,7 @@ class Monitor:
                 "duplicates_skipped": self.duplicates_skipped,
                 "malformed_skipped": self.malformed_skipped,
                 "rotations": self.rotations,
+                "recovery_warning": self.recovery_warning,
                 "tailer_state": self.tailer.state(),
             },
         }

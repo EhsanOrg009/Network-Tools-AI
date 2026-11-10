@@ -88,12 +88,14 @@ def test_tailer_incremental_reads(tmp_path: Path):
     _write(eve, [DNS_LINE])
     tailer = EveTailer(eve)
     first = tailer.poll()
+    tailer.acknowledge()
     assert len(first.events) == 1
 
     # append -> only new line is returned
     with eve.open("a", encoding="utf-8") as fh:
         fh.write(TLS_LINE + "\n")
     second = tailer.poll()
+    tailer.acknowledge()
     assert len(second.events) == 1
     assert second.events[0].event_type == "tls"
 
@@ -107,6 +109,7 @@ def test_tailer_resume_from_persisted_state(tmp_path: Path):
     _write(eve, [DNS_LINE, TLS_LINE])
     tailer = EveTailer(eve)
     tailer.poll()
+    tailer.acknowledge()
     state = tailer.state()
 
     # A new tailer (e.g. after app restart) resumes without reprocessing.
@@ -120,12 +123,14 @@ def test_tailer_handles_incomplete_line(tmp_path: Path):
     _write(eve, [DNS_LINE])
     tailer = EveTailer(eve)
     assert len(tailer.poll().events) == 1
+    tailer.acknowledge()
 
     with eve.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"event_type": "flow"})[:20])  # partial write
     result = tailer.poll()
     assert result.truncated_at_end
     assert result.events == []
+    tailer.acknowledge()
 
     # complete the line
     partial = json.dumps({"event_type": "flow"})[:20]
@@ -142,6 +147,7 @@ def test_tailer_detects_rotation(tmp_path: Path):
     _write(eve, [DNS_LINE])
     tailer = EveTailer(eve)
     tailer.poll()
+    tailer.acknowledge()
 
     # Simulate rotation: replace the file (new inode) with fresh content.
     eve.unlink()
@@ -155,6 +161,7 @@ def test_tailer_unavailable_raises(tmp_path: Path):
     tailer = EveTailer(tmp_path / "does_not_exist.json")
     with pytest.raises(SuricataUnavailable):
         tailer.poll()
+    tailer.acknowledge()
     assert tailer.last_error  # precise error is recorded for /health
 
 

@@ -8,6 +8,7 @@ in a thread pool.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -473,6 +474,7 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._transaction_depth = 0
         self._conn = sqlite3.connect(
             str(self.path), check_same_thread=False
         )
@@ -483,7 +485,7 @@ class Database:
             self._archive_legacy_tables()
             self._conn.executescript(_SCHEMA)
             self._apply_additive_migrations()
-            self._conn.commit()
+            self._commit()
 
     def _archive_legacy_tables(self) -> None:
         for name in _LEGACY_ORPHAN_TABLES:
@@ -511,6 +513,34 @@ class Database:
                     continue
                 raise
 
+    def _commit(self) -> None:
+        if self._transaction_depth == 0:
+            self._conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """Coordinate existing helpers under one commit, with nested savepoints."""
+        with self._lock:
+            depth = self._transaction_depth
+            savepoint = f"netagent_tx_{depth}"
+            self._conn.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
+            self._transaction_depth += 1
+            try:
+                yield
+                if depth == 0:
+                    self._conn.commit()
+                else:
+                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except BaseException:
+                if depth == 0:
+                    self._conn.rollback()
+                else:
+                    self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+            finally:
+                self._transaction_depth -= 1
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -531,7 +561,7 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
-            self._conn.commit()
+            self._commit()
 
     # -- hosts --------------------------------------------------------------
 
@@ -549,7 +579,7 @@ class Database:
                 """,
                 (ip, hostname, mac, now, now),
             )
-            self._conn.commit()
+            self._commit()
 
     def list_hosts(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         with self._lock:
@@ -571,37 +601,35 @@ class Database:
     def insert_event(self, ev: dict[str, Any], raw_json: str, dedupe_key: str) -> int | None:
         """Insert a normalized event. Returns the row id, or None on duplicate."""
         now = _now_iso()
-        try:
-            with self._lock:
-                cur = self._conn.execute(
-                    """
-                    INSERT INTO events(
-                        ts, ts_epoch, event_type, flow_id,
-                        src_ip, src_port, dest_ip, dest_port,
-                        proto, app_proto, ingress, raw_json, dedupe_key, created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        ev.get("ts"),
-                        ev.get("ts_epoch"),
-                        ev.get("event_type"),
-                        ev.get("flow_id"),
-                        ev.get("src_ip"),
-                        ev.get("src_port"),
-                        ev.get("dest_ip"),
-                        ev.get("dest_port"),
-                        ev.get("proto"),
-                        ev.get("app_proto"),
-                        ev.get("ingress"),
-                        raw_json,
-                        dedupe_key,
-                        now,
-                    ),
-                )
-                self._conn.commit()
-                return int(cur.lastrowid)
-        except sqlite3.IntegrityError:
-            return None  # duplicate dedupe_key
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO events(
+                    ts, ts_epoch, event_type, flow_id,
+                    src_ip, src_port, dest_ip, dest_port,
+                    proto, app_proto, ingress, raw_json, dedupe_key, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(dedupe_key) DO NOTHING
+                """,
+                (
+                    ev.get("ts"),
+                    ev.get("ts_epoch"),
+                    ev.get("event_type"),
+                    ev.get("flow_id"),
+                    ev.get("src_ip"),
+                    ev.get("src_port"),
+                    ev.get("dest_ip"),
+                    ev.get("dest_port"),
+                    ev.get("proto"),
+                    ev.get("app_proto"),
+                    ev.get("ingress"),
+                    raw_json,
+                    dedupe_key,
+                    now,
+                ),
+            )
+            self._commit()
+            return int(cur.lastrowid) if cur.rowcount else None
 
     def insert_alert(self, event_id: int, alert: dict[str, Any]) -> None:
         with self._lock:
@@ -636,7 +664,7 @@ class Database:
                     else None,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     def query_events(
         self,
@@ -788,7 +816,7 @@ class Database:
                     json.dumps(detail, ensure_ascii=False, default=str),
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     def host_observations(self, ip: str, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:
@@ -858,7 +886,7 @@ class Database:
                     int(ok), json.dumps(result, ensure_ascii=False, default=str), error,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     # -- investigations -------------------------------------------------------
 
@@ -877,7 +905,7 @@ class Database:
                     json.dumps(evidence, ensure_ascii=False, default=str),
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return int(cur.lastrowid)
 
     def finish_investigation(
@@ -911,7 +939,7 @@ class Database:
                     inv_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     def list_investigations(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         with self._lock:
@@ -977,7 +1005,7 @@ class Database:
                     fp.get("source"),
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return int(cur.lastrowid)
 
     @staticmethod
@@ -1226,7 +1254,7 @@ class Database:
                 heartbeat_interval=heartbeat_interval, capabilities=capabilities,
                 now=now,
             )
-            self._conn.commit()
+            self._commit()
         return self.get_agent(agent_id)  # type: ignore[return-value]
 
     def _insert_agent_row(
@@ -1335,7 +1363,7 @@ class Database:
                     agent_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def revoke_agent(self, agent_id: str, notes: str | None = None) -> bool:
@@ -1350,7 +1378,7 @@ class Database:
                 """,
                 (_now_iso(), notes, agent_id),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def store_inventory(
@@ -1382,7 +1410,7 @@ class Database:
                 """,
                 (agent_id, agent_id, max_history),
             )
-            self._conn.commit()
+            self._commit()
 
     def get_latest_inventory(self, agent_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -1447,7 +1475,7 @@ class Database:
                         now, now, now_epoch,
                     ),
                 )
-            self._conn.commit()
+            self._commit()
 
     def list_network_observations(
         self, *, agent_id: str | None = None, limit: int = 500, offset: int = 0
@@ -1505,7 +1533,7 @@ class Database:
                     expiry_iso, expiry_epoch, timeout_seconds,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return self.get_task(task_id)  # type: ignore[return-value]
 
     def expire_due_tasks(self, now_epoch: float | None = None) -> int:
@@ -1521,7 +1549,7 @@ class Database:
                 """,
                 (_now_iso(), now_epoch),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount
 
     def claim_next_task(
@@ -1622,7 +1650,7 @@ class Database:
                 """,
                 (status, now, blob, int(truncated), error, task_id),
             )
-            self._conn.commit()
+            self._commit()
             accepted = cur.rowcount == 1
         task = self.get_task(task_id) or {}
         task["accepted"] = accepted
@@ -1675,7 +1703,7 @@ class Database:
                 "WHERE id = ? AND status IN ('pending', 'dispatched')",
                 (_now_iso(), task_id),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def pending_task_count(self, agent_id: str) -> int:
@@ -1708,7 +1736,7 @@ class Database:
                     json.dumps(detail, ensure_ascii=False, default=str) if detail else None,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     # -- enrollment tokens -----------------------------------------------------
 
@@ -1728,7 +1756,7 @@ class Database:
                 """,
                 (token_hash, now, created_by, expiry_iso, expiry_epoch),
             )
-            self._conn.commit()
+            self._commit()
         return {"created_at": now, "expires_at": expiry_iso, "expiry_epoch": expiry_epoch}
 
     def consume_enrollment_token(self, token_hash: str, agent_id: str) -> bool:
@@ -1742,7 +1770,7 @@ class Database:
                 """,
                 (agent_id, _now_iso(), token_hash, now_epoch),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def list_enrollment_tokens(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -1765,7 +1793,7 @@ class Database:
                 "DELETE FROM enrollment_tokens WHERE expiry_epoch < ? - 7 * 86400",
                 (now_epoch,),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount
 
     # -- enrollment requests (auto-registration with admin approval) -----------
@@ -1816,7 +1844,7 @@ class Database:
                     mac, gateway, now, now_epoch, now, expiry_iso, expiry_epoch,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return self.get_enrollment_request(request_id)  # type: ignore[return-value]
 
     def get_enrollment_request(self, request_id: str) -> dict[str, Any] | None:
@@ -1875,7 +1903,7 @@ class Database:
                     request_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     def review_enrollment_request(
         self, request_id: str, *, approve: bool, reviewed_by: str, reason: str | None = None
@@ -1891,7 +1919,7 @@ class Database:
                 """,
                 (status, reviewed_by, now, None if approve else (reason or None), now, request_id),
             )
-            self._conn.commit()
+            self._commit()
         if cur.rowcount != 1:
             return None
         return self.get_enrollment_request(request_id)
@@ -1906,7 +1934,7 @@ class Database:
                 """,
                 (agent_id, _now_iso(), request_id),
             )
-            self._conn.commit()
+            self._commit()
 
     def revive_enrollment_request(
         self, request_id: str, *, identity_key_hash: str, hostname: str | None,
@@ -1943,7 +1971,7 @@ class Database:
                     expiry_iso, expiry_epoch, request_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     def complete_enrollment_request(
         self,
@@ -1991,7 +2019,7 @@ class Database:
                 """,
                 (agent_id, now, request_id),
             )
-            self._conn.commit()
+            self._commit()
         return ("created", None)
 
     def expire_due_enrollment_requests(self) -> int:
@@ -2004,7 +2032,7 @@ class Database:
                 """,
                 (_now_iso(), now_epoch),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount
 
     def count_enrollment_requests(self, *, status: str | None = None) -> int:
@@ -2054,7 +2082,7 @@ class Database:
                 """,
                 (keep,),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount
 
     # -- enrollment tokens end ---------------------------------------------------
@@ -2076,7 +2104,7 @@ class Database:
                 """,
                 (alert_id, fingerprint, priority, _now_iso()),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     @staticmethod
@@ -2269,7 +2297,7 @@ class Database:
                 "UPDATE alert_analyses SET status = 'PROCESSING' WHERE alert_id = ?",
                 (alert_id,),
             )
-            self._conn.commit()
+            self._commit()
 
     def complete_alert_analysis(
         self, alert_id: int, *, analysis: dict[str, Any], model: str,
@@ -2302,7 +2330,7 @@ class Database:
                     _now_iso(), alert_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     def fail_alert_analysis(self, alert_id: int, *, error: str) -> None:
         with self._lock:
@@ -2314,7 +2342,7 @@ class Database:
                 """,
                 (error[:500], _now_iso(), alert_id),
             )
-            self._conn.commit()
+            self._commit()
 
     def reset_alert_analysis(self, alert_id: int) -> bool:
         """Administrator re-analyze: back to PENDING, retry budget restored."""
@@ -2327,7 +2355,7 @@ class Database:
                 """,
                 (alert_id,),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def list_alert_analyses(
@@ -2395,7 +2423,7 @@ class Database:
                     datetime.now(timezone.utc).timestamp(),
                 ),
             )
-            self._conn.commit()
+            self._commit()
         self.prune_ai_activity()
         return request_id
 
@@ -2488,7 +2516,7 @@ class Database:
                 "UPDATE ai_activity SET timeline_json = ? WHERE request_id = ?",
                 (json.dumps(timeline, ensure_ascii=False), request_id),
             )
-            self._conn.commit()
+            self._commit()
 
     def finish_ai_activity(
         self, request_id: str, *, outcome_summary: str | None = None,
@@ -2534,7 +2562,7 @@ class Database:
                     request_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
 
     @staticmethod
     def _activity_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -2635,7 +2663,7 @@ class Database:
                 """,
                 (keep,),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount
 
     # =========================================================================
@@ -2680,7 +2708,7 @@ class Database:
                     question_id, alert_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return memory_id
 
     @staticmethod
@@ -2757,7 +2785,7 @@ class Database:
                 """,
                 (status, approved_by, _now_iso(), _now_iso(), memory_id),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def revoke_memory(
@@ -2779,7 +2807,7 @@ class Database:
                 """,
                 (revoked_by, reason, _now_iso(), memory_id),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def update_memory(
@@ -2808,7 +2836,7 @@ class Database:
                 f"UPDATE ai_memories SET {sets} WHERE memory_id = ?",
                 (*updates.values(), memory_id),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def _memory_status_check(
@@ -2849,7 +2877,7 @@ class Database:
                     """,
                     (now, mid),
                 )
-            self._conn.commit()
+            self._commit()
 
     def memory_usage_summary(self) -> dict[str, Any]:
         with self._lock:
@@ -2901,7 +2929,7 @@ class Database:
                     model, prompt_version,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return question_id
 
     @staticmethod
@@ -2977,7 +3005,7 @@ class Database:
                     duration_ms, error, question_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def set_question_proposals(self, question_id: str, proposal_ids: list[str]) -> None:
@@ -2986,7 +3014,7 @@ class Database:
                 "UPDATE ai_questions SET memory_proposal_ids = ? WHERE question_id = ?",
                 (json.dumps(proposal_ids, ensure_ascii=False), question_id),
             )
-            self._conn.commit()
+            self._commit()
 
     # -------------------------------------------------------------------------
     # AI action proposals (v11): observe-first engine output, admin executes
@@ -3016,7 +3044,7 @@ class Database:
                         datetime.now(timezone.utc).timestamp(), dedupe_key,
                     ),
                 )
-                self._conn.commit()
+                self._commit()
             except sqlite3.IntegrityError:
                 return None
         return action_id
@@ -3071,7 +3099,7 @@ class Database:
                 """,
                 (status, decided_by, _now_iso(), action_id),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def finish_ai_action(
@@ -3090,7 +3118,7 @@ class Database:
                     action_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     # =========================================================================
@@ -3147,7 +3175,7 @@ class Database:
                     ),
                 )
                 stored += 1
-            self._conn.commit()
+            self._commit()
         self._prune_traffic(agent_id, retention)
         return {"stored": stored}
 
@@ -3162,7 +3190,7 @@ class Database:
                 """,
                 (agent_id, agent_id, max(10, int(retention))),
             )
-            self._conn.commit()
+            self._commit()
 
     def list_traffic_samples(
         self, agent_id: str, *, hours: float = 24, limit: int = 600
@@ -3272,7 +3300,7 @@ class Database:
                     json.dumps(policy or {}, ensure_ascii=False, default=str), now,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return self.get_console_session(session_id)  # type: ignore[return-value]
 
     @staticmethod
@@ -3340,7 +3368,7 @@ class Database:
                     "UPDATE console_sessions SET last_active_at = ? WHERE id = ?",
                     (now, session_id),
                 )
-            self._conn.commit()
+            self._commit()
 
     def count_active_console_sessions(
         self, *, actor: str | None = None, agent_id: str | None = None
@@ -3400,7 +3428,7 @@ class Database:
                         (_now_iso(), row["id"]),
                     )
                     closed += max(cur2.rowcount, 0)
-            self._conn.commit()
+            self._commit()
         return closed
 
     def next_console_seq(self, session_id: str) -> int:
@@ -3425,7 +3453,7 @@ class Database:
                 """,
                 (command_id, session_id, seq, code, now, now_epoch),
             )
-            self._conn.commit()
+            self._commit()
         return self.get_console_command(command_id)  # type: ignore[return-value]
 
     def get_console_command(self, command_id: str) -> dict[str, Any] | None:
@@ -3440,7 +3468,7 @@ class Database:
             cur = self._conn.execute(
                 "UPDATE console_commands SET status = ? WHERE id = ?", (status, command_id)
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def complete_console_command(
@@ -3468,7 +3496,7 @@ class Database:
                     result_repr, error, duration_ms, int(truncated), command_id,
                 ),
             )
-            self._conn.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def list_console_commands(

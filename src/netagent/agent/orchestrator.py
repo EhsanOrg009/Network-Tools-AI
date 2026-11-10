@@ -252,6 +252,8 @@ class Orchestrator:
             return True
 
         while meta["tool_calls_count"] < budget and turns < max_turns:
+            from netagent.services.job_control import checkpoint
+            checkpoint()
             turns += 1
             if not _time_left():
                 break

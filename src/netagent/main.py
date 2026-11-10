@@ -130,6 +130,7 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
     llm = LLMClient(settings) if settings.llm_enabled else None
     from netagent.services.ai_analysis import AlertAnalysisWorker
     from netagent.services.jobs import JobManager
+    jobs = JobManager(db, settings)
 
     ai_worker = AlertAnalysisWorker(db, settings, llm) if (
         settings.ai_analysis_enabled and llm is not None
@@ -137,6 +138,7 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        jobs.start()
         if start_monitor:
             monitor.start()
         if ai_worker is not None:
@@ -144,10 +146,12 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
         try:
             yield
         finally:
+            jobs_stopped = jobs.shutdown()
             if ai_worker is not None:
                 ai_worker.stop()
             monitor.stop()
-            db.close()
+            if jobs_stopped:
+                db.close()
 
     app = FastAPI(
         title="عامل هوشمند پایش و عیب‌یابی شبکه",
@@ -188,7 +192,7 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
     app.state.settings = settings
     app.state.monitor = monitor
     app.state.llm = llm
-    app.state.jobs = JobManager()
+    app.state.jobs = jobs
     app.include_router(router, dependencies=[Depends(admin_access)])
     app.include_router(agent_router)
     app.include_router(admin_router, dependencies=[Depends(admin_access)])

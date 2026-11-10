@@ -62,6 +62,8 @@ def mac_vendor(mac: str | None) -> str | None:
 
 
 def _run(args: list[str], timeout: int) -> str | None:
+    from netagent.services.job_control import bounded_timeout
+    timeout = bounded_timeout(timeout)
     try:
         proc = subprocess.run(  # noqa: S603 - fixed args, no shell
             args, capture_output=True, timeout=timeout,

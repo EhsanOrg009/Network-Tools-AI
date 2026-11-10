@@ -12,6 +12,14 @@ MIGRATIONS = {
             late_result_json TEXT
         );
     """,
+    "002_background_jobs": """
+        CREATE TABLE IF NOT EXISTS background_jobs (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+            created_at REAL NOT NULL, started_at REAL, finished_at REAL,
+            timeout_seconds REAL NOT NULL, result_json TEXT, error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, created_at);
+    """,
 }
 
 

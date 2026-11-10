@@ -899,9 +899,28 @@ def submit_investigation_job(
             run_ping=body.run_ping,
         )
 
-    job_id = request.app.state.jobs.submit("investigation", _run)
+    from netagent.services.jobs import JobQueueFull
+    try:
+        job_id = request.app.state.jobs.submit("investigation", _run)
+    except JobQueueFull as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
     return {"job_id": job_id, "status": "queued",
             "poll": f"GET /api/jobs/{job_id}"}
+
+
+@router.post(
+    "/api/jobs/{job_id}/cancel", tags=["بررسی‌های هوشمند"], summary="لغو کار پس‌زمینه",
+    description="مدیر می‌تواند کار صف‌شده یا در حال اجرا را لغو کند؛ اجرای بومی جاری به‌صورت محدود پایان می‌یابد و مرحلهٔ تازه شروع نمی‌شود.",
+    responses=_responses("وضعیت واقعی کار پس از درخواست لغو.", {"id": "example", "status": "cancelled"},
+                         not_found="کار یافت نشد.", not_found_detail="job not found", validation=True),
+)
+def cancel_job(request: Request, job_id: str = Path(description="شناسهٔ پایدار کار پس‌زمینه.")):
+    job = request.app.state.jobs.cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    request.app.state.db.record_audit(actor=request.headers.get("x-admin-actor", "admin-api"),
+                                      action="job.cancel", target=job_id, detail={"status": job["status"]})
+    return job
 
 
 @router.get(

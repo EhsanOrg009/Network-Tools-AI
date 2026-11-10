@@ -73,6 +73,7 @@ Public فقط liveness و رابط مستندات/SPA است. `/health` جزئی
 | GET | `/api/investigations/{inv_id}` | دریافت جزئیات کامل یک بررسی | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | POST | `/api/jobs/investigation` | شروع بررسی هوشمند به‌صورت کار پس‌زمینه | Bearer، رد در Backend | فقط توکن مدیر | Admin Diagnostic | پایگاه داده + ابزار/مدل محدودشده | بالا |
 | GET | `/api/jobs/{job_id}` | دریافت وضعیت و نتیجه‌ی یک کار پس‌زمینه | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
+| POST | `/api/jobs/{job_id}/cancel` | لغو کار پس‌زمینه | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده | بالا |
 | POST | `/api/scans` | کشف میزبان (نقطه‌پایان سازگاری قبلی) | Bearer، رد در Backend | فقط توکن مدیر | Admin Diagnostic | پایگاه داده + ابزار/مدل محدودشده | بالا |
 | GET | `/api/tools` | دریافت فهرست ابزارهای تشخیصی و محدوده‌ی مجاز | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | POST | `/api/tools/{tool_name}` | فراخوانی مستقیم یک ابزار تشخیصی | Bearer، رد در Backend | فقط توکن مدیر | Admin Diagnostic | پایگاه داده + ابزار/مدل محدودشده | بالا |

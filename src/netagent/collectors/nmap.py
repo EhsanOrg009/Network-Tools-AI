@@ -78,6 +78,8 @@ def validate_port_list(settings: Settings, ports: list[int] | None) -> list[int]
 
 
 def _run_nmap(args: list[str], timeout: int) -> tuple[str, str, int, bool]:
+    from netagent.services.job_control import bounded_timeout
+    timeout = bounded_timeout(timeout)
     """Run nmap with a fixed argument list. Returns (stdout, stderr, rc, timed_out)."""
     try:
         proc = subprocess.run(  # noqa: S603 - fixed args, validated target, no shell

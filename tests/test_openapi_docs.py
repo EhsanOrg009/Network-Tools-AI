@@ -34,6 +34,7 @@ EXPECTED_ENDPOINTS = {
     ("POST", "/api/investigations"),
     ("POST", "/api/jobs/investigation"),
     ("GET", "/api/jobs/{job_id}"),
+    ("POST", "/api/jobs/{job_id}/cancel"),
     ("POST", "/api/hosts/discover"),
     ("POST", "/api/tools/{tool_name}"),
     ("POST", "/api/scans"),

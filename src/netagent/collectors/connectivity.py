@@ -11,6 +11,7 @@ from typing import Any
 
 from netagent.config import Settings
 from netagent.scope import ToolScope
+from netagent.services.job_control import bounded_timeout
 
 # Hostnames/IPs only. Rejects anything that could be interpreted as an option
 # (leading dash), spaces, shell metacharacters, etc.
@@ -56,7 +57,7 @@ def ping(
         proc = subprocess.run(  # noqa: S603 - fixed argument list, no shell
             cmd,
             capture_output=True,
-            timeout=timeout * count + 5,
+            timeout=bounded_timeout(timeout * count + 5),
         )
     except subprocess.TimeoutExpired:
         return {"target": host, "attempts": count, "responses": 0,
@@ -97,7 +98,7 @@ def tcp_check(settings: Settings, host: str, port: int, timeout: float = 3.0,
     host = (scope or ToolScope(settings, [])).authorize(host, hostname=True, host_only=True)
     if not 1 <= int(port) <= 65535:
         raise ValueError(f"port out of range: {port}")
-    timeout = max(0.5, min(float(timeout), 10.0))
+    timeout = bounded_timeout(max(0.5, min(float(timeout), 10.0)))
     started = time.monotonic()
     try:
         with socket.create_connection((host, port), timeout=timeout):

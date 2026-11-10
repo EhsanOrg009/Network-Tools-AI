@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     max_identical_tool_calls: int = Field(default=1, ge=1, le=3)
     subprocess_timeout_seconds: int = Field(default=60, ge=1, le=600)
     max_tool_output_bytes: int = Field(default=64 * 1024, ge=1024)
+    job_workers: int = Field(default=2, ge=1, le=8)
+    job_queue_size: int = Field(default=32, ge=1, le=500)
+    job_timeout_seconds: float = Field(default=900, ge=1, le=7200)
+    job_shutdown_seconds: float = Field(default=5, ge=0, le=60)
 
     # ------------------------------------------------------------------
     # Endpoint agents (v3)

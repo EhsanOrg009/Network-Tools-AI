@@ -502,6 +502,11 @@ class Database:
             ).fetchone()
             if not exists or already:
                 continue
+            # Never hide a current knowledge table on restart.
+            if name == "ai_memories":
+                columns = {r[1] for r in self._conn.execute("PRAGMA table_info(ai_memories)")}
+                if {"memory_id", "category", "status", "created_epoch"} <= columns:
+                    continue
             self._conn.execute(f"ALTER TABLE {name} RENAME TO {legacy_name}")
 
     def _apply_additive_migrations(self) -> None:
@@ -555,6 +560,39 @@ class Database:
                 "SELECT value FROM meta WHERE key = ?", (key,)
             ).fetchone()
         return row["value"] if row else None
+
+    def create_background_job(self, job_id: str, kind: str, timeout: float):
+        with self.transaction():
+            self._conn.execute("INSERT INTO background_jobs(id, kind, status, created_at, timeout_seconds) VALUES(?,?,'queued',?,?)",
+                               (job_id, kind, datetime.now(timezone.utc).timestamp(), timeout))
+            self._commit()
+
+    def update_background_job(self, job_id: str, status: str, *, result=None, error=None):
+        now = datetime.now(timezone.utc).timestamp()
+        with self.transaction():
+            self._conn.execute(
+                "UPDATE background_jobs SET status=?, started_at=CASE WHEN ?='running' THEN ? ELSE started_at END, "
+                "finished_at=CASE WHEN ?='running' THEN NULL ELSE ? END, result_json=?, error=? "
+                "WHERE id=? AND status IN ('queued','running')",
+                (status, status, now, status, now, json.dumps(result, ensure_ascii=False, default=str) if result is not None else None, error, job_id),
+            )
+            self._commit()
+
+    def get_background_job(self, job_id: str):
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM background_jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        job = dict(row)
+        blob = job.pop("result_json")
+        job["result"] = json.loads(blob) if blob else None
+        return job
+
+    def interrupt_background_jobs(self):
+        with self.transaction():
+            self._conn.execute("UPDATE background_jobs SET status='interrupted', finished_at=?, error='server stopped before job completion; not rerun' WHERE status IN ('queued','running')",
+                               (datetime.now(timezone.utc).timestamp(),))
+            self._commit()
 
     def set_meta(self, key: str, value: str) -> None:
         with self._lock:

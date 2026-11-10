@@ -127,6 +127,8 @@ class LLMClient:
                 max_tokens=max_tokens or s.llm_max_output_tokens,
                 stream=False,
             )
+            from netagent.services.job_control import bounded_timeout
+            kwargs["timeout"] = bounded_timeout(s.llm_timeout_seconds)
             if response_format is not None:
                 kwargs["response_format"] = response_format
             response = self._client.chat.completions.create(**kwargs)
@@ -192,6 +194,8 @@ class LLMClient:
                 stream=True,
                 stream_options={"include_usage": True},
             )
+            from netagent.services.job_control import bounded_timeout
+            kwargs["timeout"] = bounded_timeout(s.llm_timeout_seconds)
             if response_format is not None:
                 kwargs["response_format"] = response_format
             stream = self._client.chat.completions.create(**kwargs)

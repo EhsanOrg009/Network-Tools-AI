@@ -631,6 +631,8 @@ def execute_tool(
 ) -> dict[str, Any]:
     """Validate and execute one tool request. Never raises; errors come back
     as structured results the model can read."""
+    from netagent.services.job_control import checkpoint
+    checkpoint()
     spec = registry.get(tool_name)
     if spec is None or tool_name.startswith("_") or "\x00" in tool_name:
         return {"ok": False, "error": f"ابزار ناشناخته است: {tool_name!r}"}

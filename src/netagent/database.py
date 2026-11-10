@@ -2259,13 +2259,17 @@ class Database:
                 (max_attempts, alert_id, max_attempts),
             )
 
-    def retry_provider_analyses(self, *, max_attempts: int) -> None:
+    def retry_provider_analyses(self, *, max_attempts: int, capacity: int = 200) -> None:
         """Rearm connection failures after a successful provider probe."""
         with self.transaction():
+            active = self._conn.execute(
+                "SELECT COUNT(*) FROM alert_analyses WHERE status IN ('PENDING','PROCESSING')"
+            ).fetchone()[0]
             self._conn.execute(
-                "UPDATE alert_analyses SET provider_failures=0, status='PENDING', attempts=0 WHERE status='FAILED' "
-                "AND provider_failures>=? AND next_retry_epoch<=? AND error LIKE 'LLMUnavailable:%'",
-                (max_attempts, datetime.now(timezone.utc).timestamp()),
+                "UPDATE alert_analyses SET provider_failures=0, status='PENDING', attempts=0 WHERE alert_id IN ("
+                "SELECT alert_id FROM alert_analyses WHERE status='FAILED' AND provider_failures>=? "
+                "AND next_retry_epoch<=? AND error LIKE 'LLMUnavailable:%' ORDER BY created_at,alert_id LIMIT ?)",
+                (max_attempts, datetime.now(timezone.utc).timestamp(), max(0, capacity - active)),
             )
 
     def alert_analysis_history(self, alert_id: int) -> list[dict[str, Any]]:
@@ -2370,7 +2374,7 @@ class Database:
                 self._conn.execute(
                     """
                     UPDATE alert_analyses
-                    SET status = 'PROCESSING', started_at = COALESCE(started_at, ?)
+                    SET status = 'PROCESSING', started_at = ?
                     WHERE alert_id = ?
                     """,
                     (now_iso, best["alert_id"]),
@@ -2430,7 +2434,7 @@ class Database:
                         """
                         UPDATE alert_analyses
                         SET status = 'PROCESSING',
-                            started_at = COALESCE(started_at, ?),
+                            started_at = ?,
                             batch_id = ?
                         WHERE alert_id = ?
                         """,

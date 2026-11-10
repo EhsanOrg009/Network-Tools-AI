@@ -364,3 +364,14 @@ def test_partial_json_with_complete_fields_is_not_successfully_repaired(db, sett
     assert AlertAnalysisWorker(db, settings, Partial()).process_one()
     row = db.get_alert_analysis(aid)
     assert row["status"] == "FAILED" and "invalid_json" in row["error"]
+
+
+def test_outage_recovery_respects_active_capacity(db):
+    ids = [ingest(db, n) for n in range(1, 4)]
+    for aid in ids:
+        request(db, aid)
+        for _ in range(3):
+            db.defer_alert_analysis(aid, error="LLMUnavailable: offline", delay_seconds=0)
+    db.retry_provider_analyses(max_attempts=3, capacity=1)
+    assert db.analysis_summary()["counts"]["PENDING"] == 1
+    assert db.analysis_summary()["counts"]["FAILED"] == 2

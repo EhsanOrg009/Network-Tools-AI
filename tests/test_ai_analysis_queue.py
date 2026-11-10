@@ -148,6 +148,17 @@ def test_batch_prompt_demands_per_alert_results_and_bounds_evidence():
     assert len(messages[1]["content"]) <= 4200 * 2
 
 
+def test_large_batch_keeps_valid_json_and_every_identity():
+    alerts = [dict(id=i, src_ip="2001:db8::1", dest_ip="2001:db8::2", src_port=1234,
+                   dest_port=443, signature="long signature " * 300, category="category " * 200)
+              for i in range(1, 11)]
+    body = build_batch_analysis_messages(alerts)[1]["content"]
+    records = [json.loads(line) for line in body.splitlines()[1:]]
+    assert [r["id"] for r in records] == list(range(1, 11))
+    assert all(r["dest_ip"] == "2001:db8::2" and r["dest_port"] == 443 for r in records)
+    assert len(body) < 8400
+
+
 def test_batch_claim_groups_same_source_and_rule(db, settings):
     ids_a = _seed_same_behavior_fixed(db, "11.0.1.1", 9001, severity=2, count=4)
     ids_b = _seed_same_behavior_fixed(db, "11.0.1.9", 9009, severity=4, count=3)

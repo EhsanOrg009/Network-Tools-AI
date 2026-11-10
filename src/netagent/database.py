@@ -11,9 +11,14 @@ import json
 from contextlib import contextmanager
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+
+class AnalysisQueueFull(RuntimeError):
+    pass
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -672,8 +677,8 @@ class Database:
             return int(cur.lastrowid) if cur.rowcount else None
 
     def insert_alert(self, event_id: int, alert: dict[str, Any]) -> None:
-        with self._lock:
-            self._conn.execute(
+        with self.transaction():
+            cur = self._conn.execute(
                 """
                 INSERT INTO alerts(
                     event_id, ts, ts_epoch, flow_id,
@@ -704,6 +709,12 @@ class Database:
                     else None,
                 ),
             )
+            if self.security_ai_auto_enabled():
+                from netagent.services.ai_analysis import analysis_priority
+                self._conn.execute(
+                    "INSERT INTO ai_analysis_intake(alert_id, job_id, created_at, priority) VALUES(?,?,?,?)",
+                    (cur.lastrowid, uuid.uuid4().hex, _now_iso(), analysis_priority(alert)),
+                )
             self._commit()
 
     def query_events(
@@ -2159,18 +2170,123 @@ class Database:
     # AI alert analyses (v5): background LLM analysis of security alerts
     # =========================================================================
 
+    def security_ai_auto_enabled(self) -> bool:
+        return self.get_meta("security_ai_auto_enabled") == "true"
+
+    def set_security_ai_auto(self, enabled: bool, *, actor: str) -> bool:
+        with self.transaction():
+            old = self.security_ai_auto_enabled()
+            if old != enabled:
+                self.set_meta("security_ai_auto_enabled", "true" if enabled else "false")
+                self.record_audit(actor=actor, action="ai_analysis.auto_mode", target="security",
+                                  detail={"previous": old, "enabled": enabled})
+            return enabled
+
+    def promote_analysis_intake(self, capacity: int) -> int:
+        """A bounded work window; durable intake retains overflow without loss."""
+        from netagent.services.ai_analysis import alert_fingerprint
+        with self.transaction():
+            active = self._conn.execute(
+                "SELECT COUNT(*) FROM alert_analyses WHERE status IN ('PENDING','PROCESSING')"
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                "SELECT * FROM ai_analysis_intake ORDER BY alert_id LIMIT ?", (max(0, capacity - active),)
+            ).fetchall()
+            for row in rows:
+                self.enqueue_alert_analysis(alert_id=row["alert_id"],
+                    fingerprint=alert_fingerprint(self.get_alert(row["alert_id"])),
+                    priority=row["priority"], job_id=row["job_id"], origin="automatic",
+                    created_at=row["created_at"])
+                self._conn.execute("DELETE FROM ai_analysis_intake WHERE alert_id=?", (row["alert_id"],))
+            return len(rows)
+
+    def request_alert_analysis(self, alert_id: int, *, actor: str, capacity: int,
+                               reanalyze: bool = False) -> dict[str, Any] | None:
+        from netagent.services.ai_analysis import alert_fingerprint, analysis_priority
+        with self.transaction():
+            alert = self.get_alert(alert_id)
+            if alert is None:
+                return None
+            row = self.get_alert_analysis(alert_id)
+            if row and (row["status"] in {"PENDING", "PROCESSING"} or
+                        (row["status"] == "COMPLETED" and not reanalyze)):
+                return row
+            if self.pending_alert_analysis_count() >= capacity:
+                raise AnalysisQueueFull("ظرفیت صف تحلیل پر است؛ بعداً دوباره تلاش کنید.")
+            if row:
+                self.reset_alert_analysis(alert_id)
+            else:
+                self.enqueue_alert_analysis(alert_id=alert_id, fingerprint=alert_fingerprint(alert),
+                                            priority=analysis_priority(alert), origin="manual")
+            action = "reanalyze" if reanalyze else "retry" if row else "analyze"
+            result = self.get_alert_analysis(alert_id)
+            self.record_audit(actor=actor, action=f"ai_analysis.{action}", target=str(alert_id),
+                              detail={"job_id": result["job_id"]})
+            return result
+
+    def analysis_summary(self) -> dict[str, Any]:
+        with self._lock:
+            counts = {status: 0 for status in ("PENDING", "PROCESSING", "COMPLETED", "FAILED")}
+            counts.update({r[0]: r[1] for r in self._conn.execute(
+                "SELECT status,COUNT(*) FROM alert_analyses GROUP BY status")})
+            counts["PENDING"] += self._conn.execute("SELECT COUNT(*) FROM ai_analysis_intake").fetchone()[0]
+            last = self._conn.execute("SELECT MAX(analyzed_at) FROM alert_analyses").fetchone()[0]
+            error = self._conn.execute(
+                "SELECT error FROM alert_analyses WHERE error IS NOT NULL ORDER BY analyzed_at DESC LIMIT 1"
+            ).fetchone()
+            return {"auto_enabled": self.security_ai_auto_enabled(), "counts": counts,
+                    "last_processed_at": last, "last_error": error[0] if error else None}
+
+    def recover_processing_analyses(self, *, delay_seconds: float) -> None:
+        with self.transaction():
+            self._conn.execute(
+                "UPDATE alert_analyses SET status='PENDING', started_at=NULL, "
+                "error='Interrupted: server restarted before persistence', next_retry_epoch=? "
+                "WHERE status='PROCESSING'",
+                (datetime.now(timezone.utc).timestamp() + delay_seconds,),
+            )
+
+    def defer_alert_analysis(self, alert_id: int, *, error: str, delay_seconds: float,
+                             count_failure: bool = True, max_attempts: int = 3) -> None:
+        with self.transaction():
+            self._conn.execute(
+                "UPDATE alert_analyses SET status='PENDING', error=?, provider_failures=provider_failures+?, "
+                "next_retry_epoch=?, analyzed_at=? WHERE alert_id=?",
+                (error[:500], int(count_failure), datetime.now(timezone.utc).timestamp() + delay_seconds, _now_iso(), alert_id),
+            )
+            self._conn.execute(
+                "UPDATE alert_analyses SET status='FAILED', attempts=? WHERE alert_id=? AND provider_failures>=?",
+                (max_attempts, alert_id, max_attempts),
+            )
+
+    def retry_provider_analyses(self, *, max_attempts: int) -> None:
+        """Rearm connection failures after a successful provider probe."""
+        with self.transaction():
+            self._conn.execute(
+                "UPDATE alert_analyses SET provider_failures=0, status='PENDING', attempts=0 WHERE status='FAILED' "
+                "AND provider_failures>=? AND next_retry_epoch<=? AND error LIKE 'LLMUnavailable:%'",
+                (max_attempts, datetime.now(timezone.utc).timestamp()),
+            )
+
+    def alert_analysis_history(self, alert_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            return [json.loads(r[0]) for r in self._conn.execute(
+                "SELECT result_json FROM ai_analysis_history WHERE alert_id=? ORDER BY archived_at DESC",
+                (alert_id,))]
+
     def enqueue_alert_analysis(
-        self, *, alert_id: int, fingerprint: str, priority: int = 5
+        self, *, alert_id: int, fingerprint: str, priority: int = 5,
+        job_id: str | None = None, origin: str = "legacy", created_at: str | None = None,
     ) -> bool:
         """Insert a PENDING analysis row; False when it already exists."""
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT OR IGNORE INTO alert_analyses(
-                    alert_id, fingerprint, status, priority, created_at
-                ) VALUES(?, ?, 'PENDING', ?, ?)
+                    alert_id, fingerprint, status, priority, created_at, job_id, origin
+                ) VALUES(?, ?, 'PENDING', ?, ?, ?, ?)
                 """,
-                (alert_id, fingerprint, priority, _now_iso()),
+                (alert_id, fingerprint, priority, created_at or _now_iso(), job_id or uuid.uuid4().hex, origin),
             )
             self._commit()
         return cur.rowcount > 0
@@ -2183,9 +2299,8 @@ class Database:
         """Anti-starvation ordering key for queued analyses.
 
         Lower is claimed sooner. Every full ``starvation_minutes`` of waiting
-        improves (reduces) one row's effective priority by up to 4 levels, so
-        low-severity events still get processed even when critical events
-        arrive continuously — while fresh critical events always win.
+        improves (reduces) one row's effective priority without a ceiling,
+        so old low-severity events eventually outrank fresh critical events.
         """
         boost = 0
         if created_at:
@@ -2194,13 +2309,14 @@ class Database:
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 age_minutes = max(0.0, (now_epoch - created.timestamp()) / 60.0)
-                boost = min(4, int(age_minutes / max(1.0, starvation_minutes)))
+                boost = int(age_minutes / max(1.0, starvation_minutes))
             except (TypeError, ValueError):
                 boost = 0
-        return max(0, priority - boost)
+        return priority - boost
 
     def _analysis_candidates(
-        self, max_attempts: int, steal_limit: int = 50
+        self, max_attempts: int, steal_limit: int = 50, *, now_epoch: float,
+        starvation_minutes: float,
     ) -> list[sqlite3.Row]:
         """Fairly-ordered claimable analysis rows (call without the lock)."""
         rows = self._conn.execute(
@@ -2210,11 +2326,13 @@ class Database:
                    al.signature_id AS _signature_id,
                    al.severity AS _severity
             FROM alert_analyses a LEFT JOIN alerts al ON al.id = a.alert_id
-            WHERE a.status = 'PENDING'
-               OR (a.status = 'FAILED' AND a.attempts < ?)
-            ORDER BY a.priority ASC, a.alert_id ASC LIMIT ?
+            WHERE (a.status = 'PENDING' OR (a.status = 'FAILED' AND a.attempts < ?))
+              AND a.next_retry_epoch <= ?
+              AND a.provider_failures < ?
+            ORDER BY (a.priority - CAST(MAX(0, (? - unixepoch(a.created_at)) / ?) AS INTEGER)),
+                     a.created_at, a.alert_id LIMIT ?
             """,
-            (max_attempts, steal_limit),
+            (max_attempts, now_epoch, max_attempts, now_epoch, max(1, starvation_minutes) * 60, steal_limit),
         ).fetchall()
         return rows
 
@@ -2232,7 +2350,8 @@ class Database:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                rows = self._analysis_candidates(max_attempts)
+                rows = self._analysis_candidates(max_attempts, now_epoch=now_epoch,
+                                                 starvation_minutes=starvation_minutes)
                 if not rows:
                     self._conn.execute("COMMIT")
                     return None
@@ -2285,7 +2404,8 @@ class Database:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                rows = self._analysis_candidates(max_attempts)
+                rows = self._analysis_candidates(max_attempts, now_epoch=now_epoch,
+                                                 starvation_minutes=starvation_minutes)
                 if not rows:
                     self._conn.execute("COMMIT")
                     return []
@@ -2301,6 +2421,7 @@ class Database:
                     if r["_src_ip"] == lead["_src_ip"]
                     and r["_signature_id"] == lead["_signature_id"]
                     and r["_severity"] == lead["_severity"]
+                    and r["origin"] != "manual" and lead["origin"] != "manual"
                 ][: max(0, max_batch - 1)]
                 chosen = [lead, *peers]
                 now_iso = _now_iso()
@@ -2338,7 +2459,10 @@ class Database:
             row = self._conn.execute(
                 "SELECT * FROM alert_analyses WHERE alert_id = ?", (alert_id,)
             ).fetchone()
-        return self._alert_analysis_row_to_dict(row) if row else None
+            if row:
+                return self._alert_analysis_row_to_dict(row)
+            pending = self._conn.execute("SELECT * FROM ai_analysis_intake WHERE alert_id=?", (alert_id,)).fetchone()
+            return {**dict(pending), "status": "PENDING", "origin": "automatic", "attempts": 0} if pending else None
 
     @staticmethod
     def _alert_analysis_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -2378,7 +2502,7 @@ class Database:
                 UPDATE alert_analyses SET status = 'COMPLETED',
                        summary = ?, importance = ?, evidence_json = ?,
                        anomaly_likelihood = ?, confidence = ?, recommendation = ?,
-                       model = ?, prompt_version = ?, error = NULL,
+                       model = ?, prompt_version = ?, error = NULL, next_retry_epoch=0, provider_failures=0,
                        attempts = attempts + 1,
                        duration_ms = ?,
                        memories_json = ?,
@@ -2414,14 +2538,22 @@ class Database:
 
     def reset_alert_analysis(self, alert_id: int) -> bool:
         """Administrator re-analyze: back to PENDING, retry budget restored."""
-        with self._lock:
+        with self.transaction():
+            previous = self.get_alert_analysis(alert_id)
+            if not previous or previous["status"] in {"PENDING", "PROCESSING"}:
+                return False
+            self._conn.execute(
+                "INSERT OR IGNORE INTO ai_analysis_history(job_id,alert_id,archived_at,result_json) VALUES(?,?,?,?)",
+                (previous["job_id"], alert_id, _now_iso(), json.dumps(previous, ensure_ascii=False)),
+            )
             cur = self._conn.execute(
                 """
                 UPDATE alert_analyses SET status = 'PENDING', error = NULL,
-                       attempts = 0, started_at = NULL, batch_id = NULL
+                       attempts = 0, started_at = NULL, batch_id = NULL, origin='manual',
+                       job_id=?, next_retry_epoch=0, provider_failures=0, created_at=?
                 WHERE alert_id = ?
                 """,
-                (alert_id,),
+                (uuid.uuid4().hex, _now_iso(), alert_id),
             )
             self._commit()
         return cur.rowcount > 0
@@ -2448,7 +2580,8 @@ class Database:
     def pending_alert_analysis_count(self) -> int:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM alert_analyses WHERE status IN ('PENDING', 'PROCESSING')"
+                "SELECT (SELECT COUNT(*) FROM alert_analyses WHERE status IN ('PENDING', 'PROCESSING')) "
+                "+ (SELECT COUNT(*) FROM ai_analysis_intake) AS c"
             ).fetchone()
         return int(row["c"])
 

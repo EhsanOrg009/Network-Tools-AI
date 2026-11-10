@@ -1,6 +1,25 @@
 """مهاجرت‌های افزایشی و تکرارپذیر؛ داده‌ها و شناسه‌های موجود حفظ می‌شوند."""
 
 MIGRATIONS = {
+    "003_security_ai_control": """
+        INSERT OR IGNORE INTO meta(key, value) VALUES('security_ai_auto_enabled', 'false');
+        ALTER TABLE alert_analyses ADD COLUMN job_id TEXT;
+        ALTER TABLE alert_analyses ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy';
+        ALTER TABLE alert_analyses ADD COLUMN next_retry_epoch REAL NOT NULL DEFAULT 0;
+        ALTER TABLE alert_analyses ADD COLUMN provider_failures INTEGER NOT NULL DEFAULT 0;
+        UPDATE alert_analyses SET job_id = lower(hex(randomblob(16))) WHERE job_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_analysis_job ON alert_analyses(job_id);
+        CREATE TABLE IF NOT EXISTS ai_analysis_intake (
+            alert_id INTEGER PRIMARY KEY REFERENCES alerts(id),
+            job_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+            priority INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ai_analysis_history (
+            job_id TEXT PRIMARY KEY, alert_id INTEGER NOT NULL REFERENCES alerts(id),
+            archived_at TEXT NOT NULL, result_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_history_alert ON ai_analysis_history(alert_id);
+    """,
     "001_agent_result_receipts": """
         CREATE TABLE IF NOT EXISTS agent_result_receipts (
             result_id TEXT PRIMARY KEY,

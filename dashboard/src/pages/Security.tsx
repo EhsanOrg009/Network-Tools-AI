@@ -14,6 +14,8 @@ import { IconShield, IconAlert } from "../components/icons";
 
 export interface AlertAnalysisRow {
   alert_id: number;
+  job_id?: string;
+  provider_failures?: number;
   status: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
   summary: string | null;
   importance: "low" | "medium" | "high" | null;
@@ -28,6 +30,16 @@ export interface AlertAnalysisRow {
   analyzed_at: string | null;
 }
 
+interface SecurityAIStatus {
+  auto_enabled: boolean;
+  counts: Record<"PENDING" | "PROCESSING" | "COMPLETED" | "FAILED", number>;
+  last_processed_at: string | null;
+  last_error: string | null;
+  model: string;
+  connection: { ok: boolean; detail: string };
+  worker_enabled: boolean;
+}
+
 const importanceBadge: Record<string, string> = {
   low: "badge-muted", medium: "badge-warn", high: "badge-danger",
 };
@@ -35,8 +47,9 @@ const likelihoodFa: Record<string, string> = {
   low: "کم", medium: "متوسط", high: "زیاد", unknown: "نامشخص",
 };
 
-function AnalysisCell({ analysis, onOpen }: { analysis?: AlertAnalysisRow; onOpen: () => void }) {
-  if (!analysis) return <span className="small muted">در صف…</span>;
+function AnalysisCell({ analysis, onOpen, unavailable }: { analysis?: AlertAnalysisRow; onOpen: () => void; unavailable: boolean }) {
+  if (unavailable) return <span className="small muted">وضعیت تحلیل نامشخص</span>;
+  if (!analysis) return <span className="small muted">تحلیل نشده</span>;
   if (analysis.status === "COMPLETED") {
     return (
       <button className="btn ghost analysis-cell" onClick={onOpen} title="نمایش تحلیل کامل">
@@ -53,7 +66,7 @@ function AnalysisCell({ analysis, onOpen }: { analysis?: AlertAnalysisRow; onOpe
     return <span className="badge badge-accent"><span className="dot pulse" />در حال تحلیل…</span>;
   }
   if (analysis.status === "PENDING") {
-    return <span className="badge badge-muted">در صف</span>;
+    return <span className="badge badge-muted" title={analysis.error ?? undefined}>{analysis.error ? "در صف — خطای مدل" : "در صف"}</span>;
   }
   return (
     <button className="btn ghost analysis-cell" onClick={onOpen}>
@@ -74,21 +87,34 @@ export default function SecurityPage() {
   const [detail, setDetail] = useState<AlertRow | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [refreshKey, setRefresh] = useState(0);
+  const [aiStatus, setAIStatus] = useState<SecurityAIStatus | null>(null);
+  const [aiError, setAIError] = useState<string | null>(null);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       setError(null);
       const sevQ = sev === "all" ? "" : `&severity=${sev}`;
-      const [d, ai] = await Promise.all([
+      const [d, status] = await Promise.all([
         api.get<{ items: AlertRow[]; total: number }>(
           `/api/alerts?limit=200&group_by_flow=false${sevQ}`,
         ),
-        // analyses live behind the admin API; alerts must still render if it fails
-        api.get<{ items: AlertAnalysisRow[] }>("/api/admin/v1/ai-analyses?limit=500")
-          .catch(() => ({ items: [] as AlertAnalysisRow[] })),
+        api.get<SecurityAIStatus>("/api/admin/v1/security-ai").catch(() => null),
       ]);
       setAlerts(d.items);
       setTotal(d.total);
+      setAIStatus(status);
+      let ai: { items: AlertAnalysisRow[] };
+      try {
+        ai = d.items.length ? await api.get<{ items: AlertAnalysisRow[] }>(
+          `/api/admin/v1/ai-analyses?alert_ids=${d.items.map((a) => a.id).join(",")}`,
+        ) : { items: [] };
+        setAIError(status ? null : "دریافت وضعیت مدل و تنظیم خودکار ناموفق بود.");
+      } catch (e) {
+        setAIError(e instanceof ApiError ? e.detail : "دریافت وضعیت تحلیل ناموفق بود.");
+        return;
+      }
       const map = new Map<number, AlertAnalysisRow>();
       for (const row of (ai.items ?? []) as AlertAnalysisRow[]) {
         if (typeof row?.alert_id === "number") map.set(row.alert_id, row);
@@ -103,15 +129,48 @@ export default function SecurityPage() {
     }
   }, [sev]);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      await load();
+      if (!stopped) timer = setTimeout(refresh, 5000);
+    };
+    void refresh();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [load, refreshKey]);
+
+  const toggleAuto = async () => {
+    if (!aiStatus) return;
+    setAutoBusy(true);
+    setActionError(null);
+    try {
+      await api.put("/api/admin/v1/security-ai/automatic", { enabled: !aiStatus.auto_enabled });
+      await load();
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.detail : "تغییر حالت خودکار ناموفق بود.");
+    } finally { setAutoBusy(false); }
+  };
+
+  const analyze = async (alertId: number) => {
+    setBusy(alertId);
+    setActionError(null);
+    try {
+      await api.post(`/api/admin/v1/ai-analyses/${alertId}/analyze`);
+      await load();
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.detail : "ثبت تحلیل ناموفق بود.");
+    } finally { setBusy(null); }
+  };
 
   const reanalyze = useCallback(async (alertId: number) => {
     setBusy(alertId);
+    setActionError(null);
     try {
       await api.post(`/api/admin/v1/ai-analyses/${alertId}/reanalyze`);
       await load();
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : "تحلیل مجدد ناموفق بود.");
+      setActionError(e instanceof ApiError ? e.detail : "تحلیل مجدد ناموفق بود.");
     } finally {
       setBusy(null);
     }
@@ -144,6 +203,33 @@ export default function SecurityPage() {
 
   return (
     <div>
+      <div className="card card-pad" style={{ marginBottom: 14 }}>
+        <div className="row wrap" style={{ gap: 12 }}>
+          <b>تحلیل خودکار هوش مصنوعی</b>
+          <button className="btn" role="switch" aria-label="تحلیل خودکار هوش مصنوعی"
+            aria-checked={aiStatus?.auto_enabled ?? false} disabled={autoBusy || !aiStatus}
+            onClick={() => { void toggleAuto(); }}>
+            {aiStatus ? (aiStatus.auto_enabled ? "روشن — ON" : "خاموش — OFF") : "در حال دریافت وضعیت…"}
+          </button>
+          <span className="small muted">فقط هشدارهای تازه؛ تحلیل دستی همیشه مستقل است.</span>
+        </div>
+        {aiStatus && <>
+          <div className="row wrap small" style={{ gap: 16, marginTop: 12 }}>
+            <span>در صف: {faNum(aiStatus.counts.PENDING)}</span>
+            <span>در حال پردازش: {faNum(aiStatus.counts.PROCESSING)}</span>
+            <span>موفق: {faNum(aiStatus.counts.COMPLETED)}</span>
+            <span>ناموفق: {faNum(aiStatus.counts.FAILED)}</span>
+            <span>آخرین پردازش: {aiStatus.last_processed_at ? fmtDateTime(aiStatus.last_processed_at) : "هنوز پردازشی ثبت نشده"}</span>
+          </div>
+          <div className="small" style={{ marginTop: 8 }}>
+            مدل: <span className="technical">{aiStatus.model}</span> ·
+            {aiStatus.connection.ok ? " اتصال مدل برقرار است" : ` مدل در دسترس نیست (${aiStatus.connection.detail})`}
+            {!aiStatus.worker_enabled && " · worker تحلیل در تنظیمات سرور غیرفعال است؛ درخواست‌ها محفوظ می‌مانند."}
+          </div>
+          {aiStatus.last_error && <div className="small" role="status">آخرین خطا: {aiStatus.last_error}</div>}
+        </>}
+        {(aiError || actionError) && <div role="alert" style={{ color: "var(--danger)", marginTop: 8 }}>{actionError || aiError}</div>}
+      </div>
       <div className="card card-pad" style={{ marginBottom: 14 }}>
         <div className="row wrap" style={{ gap: 12 }}>
           <IconShield size={20} style={{ color: "var(--danger)" }} />
@@ -185,7 +271,7 @@ export default function SecurityPage() {
             <div className="small muted">هشدار مطابق فیلتر فعلی ({sev === "all" ? "همه" : severityLabel(Number(sev))}) در پایگاه‌داده</div>
             <div className="small muted" style={{ marginTop: 6 }}>
               تحلیل‌شده: {faNum([...analyses.values()].filter((a) => a.status === "COMPLETED").length)} ·
-              در صف: {faNum([...analyses.values()].filter((a) => a.status !== "COMPLETED").length)}
+              در صف این صفحه: {faNum([...analyses.values()].filter((a) => a.status === "PENDING").length)}
             </div>
           </div>
         </div>
@@ -223,7 +309,16 @@ export default function SecurityPage() {
                               : <span className="badge badge-warn">allowed</span>}
                         </td>
                         <td onClick={(e) => e.stopPropagation()}>
-                          <AnalysisCell analysis={analyses.get(a.id)} onOpen={() => setDetail(a)} />
+                          <AnalysisCell analysis={analyses.get(a.id)} unavailable={!!aiError} onOpen={() => setDetail(a)} />
+                          <button className="btn ghost" disabled={busy === a.id || !!aiError}
+                            aria-label={`تحلیل با هوش مصنوعی هشدار ${a.id}`}
+                            onClick={() => {
+                              const state = analyses.get(a.id)?.status;
+                              if (state && state !== "FAILED") setDetail(a);
+                              else void analyze(a.id);
+                            }}>
+                            {busy === a.id ? "…" : analyses.get(a.id)?.status === "FAILED" ? "تلاش دوباره" : "تحلیل با هوش مصنوعی"}
+                          </button>
                         </td>
                         <td className="small muted" title={fmtDateTime(a.ts)}>{fmtAgo(a.ts)}</td>
                       </tr>
@@ -253,13 +348,13 @@ export default function SecurityPage() {
                   </span>
                   {detailAnalysis.model && <span className="small muted">{detailAnalysis.model}</span>}
                   <div className="spacer" />
-                  <button
+                  {detailAnalysis.status === "COMPLETED" && <button
                     className="btn"
                     disabled={busy === detail.id}
                     onClick={() => { void reanalyze(detail.id); }}
                   >
                     {busy === detail.id ? "…" : "⟳ تحلیل مجدد"}
-                  </button>
+                  </button>}
                 </div>
                 {detailAnalysis.status === "COMPLETED" ? (
                   <>
@@ -290,8 +385,9 @@ export default function SecurityPage() {
                     خطا: {detailAnalysis.error ?? "نامشخص"} (تلاش {faNum(detailAnalysis.attempts)})
                   </div>
                 ) : (
-                  <div className="small muted">تحلیل در صف/در حال اجراست؛ به‌زودی این‌جا نمایش داده می‌شود.</div>
+                  <div className="small muted">تحلیل در صف/در حال اجراست.{detailAnalysis.error && ` خطا: ${detailAnalysis.error}`}</div>
                 )}
+                {detailAnalysis.job_id && <div className="small technical">job_id={detailAnalysis.job_id}</div>}
               </div>
             )}
 

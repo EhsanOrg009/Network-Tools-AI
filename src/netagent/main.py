@@ -147,10 +147,11 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
             yield
         finally:
             jobs_stopped = jobs.shutdown()
+            ai_stopped = True
             if ai_worker is not None:
-                ai_worker.stop()
+                ai_stopped = ai_worker.stop()
             monitor.stop()
-            if jobs_stopped:
+            if jobs_stopped and ai_stopped:
                 db.close()
 
     app = FastAPI(
@@ -193,6 +194,7 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
     app.state.monitor = monitor
     app.state.llm = llm
     app.state.jobs = jobs
+    app.state.ai_worker = ai_worker
     app.include_router(router, dependencies=[Depends(admin_access)])
     app.include_router(agent_router)
     app.include_router(admin_router, dependencies=[Depends(admin_access)])

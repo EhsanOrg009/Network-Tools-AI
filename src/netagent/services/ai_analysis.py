@@ -29,6 +29,7 @@ from typing import Any
 
 from netagent.agent.llm_client import (
     LLMClient,
+    LLMBusy,
     LLMUnavailable,
 )
 from netagent.config import Settings
@@ -243,11 +244,16 @@ class AlertAnalysisWorker:
         self._thread: threading.Thread | None = None
         self._failure_streak = 0
         self._batch_consecutive_failures = 0
+        self._next_probe = 0.0
 
     # -- queue maintenance ------------------------------------------------------
 
     def enqueue_missing(self, limit: int | None = None) -> int:
-        """Create PENDING rows for recent alerts that lack one (bounded)."""
+        """Explicit legacy backfill helper; NEVER called by the worker loop.
+
+        Automatic admission happens atomically in Database.insert_alert.
+        Kept for existing offline callers; APIs use request_alert_analysis.
+        """
         limit = limit or self.settings.ai_analysis_backlog_limit
         backlog = self.db.pending_alert_analysis_count()
         room = max(0, limit - backlog)
@@ -452,13 +458,23 @@ class AlertAnalysisWorker:
             self._maybe_propose_followup(row["alert_id"], alert, analysis)  # type: ignore[arg-type]
         except LLMUnavailable as exc:
             error = f"{exc.__class__.__name__}: {exc}"
-            self.db.fail_alert_analysis(row["alert_id"], error=error)
+            self._defer_provider(row, exc)
             trace.fail(error, timeout="timeout" in error.lower())
         except Exception as exc:  # store precise failure; row becomes FAILED
             self.db.fail_alert_analysis(
                 row["alert_id"], error=f"{exc.__class__.__name__}: {exc}"
             )
+            self._failure_streak = min(self._failure_streak + 1, 10)
             trace.fail(f"{exc.__class__.__name__}: {exc}")
+
+    def _defer_provider(self, row: dict[str, Any], exc: LLMUnavailable) -> None:
+        self._failure_streak = min(self._failure_streak + 1, 10)
+        delay = min(600, self.settings.ai_analysis_poll_seconds * 2 ** min(row.get("provider_failures", 0) + 1, 7))
+        if "timeout" in type(exc).__name__.lower() or isinstance(exc, LLMBusy):
+            delay = max(delay, self.settings.llm_timeout_cooldown_seconds)
+        self.db.defer_alert_analysis(row["alert_id"], error=f"{type(exc).__name__}: {exc}",
+                                     delay_seconds=delay, count_failure=not isinstance(exc, LLMBusy),
+                                     max_attempts=self.settings.ai_analysis_max_attempts)
 
     def process_one(self) -> bool:
         """Claim one batch (coherent group) and analyze it. Returns True when
@@ -468,6 +484,7 @@ class AlertAnalysisWorker:
         """
         if self.llm is None:
             return False
+        self.db.promote_analysis_intake(self.settings.ai_analysis_backlog_limit)
         try:
             batch = self.db.claim_next_alert_analysis_batch(
                 max_batch=self.settings.ai_analysis_batch_size,
@@ -580,7 +597,7 @@ class AlertAnalysisWorker:
         except LLMUnavailable as exc:
             error = f"{exc.__class__.__name__}: {exc}"
             for alert_id in rows_by_id:
-                self.db.fail_alert_analysis(alert_id, error=error)
+                self._defer_provider(rows_by_id[alert_id], exc)
             trace.fail(error, timeout="timeout" in error.lower())
             self._failure_streak += 1
             return True
@@ -619,7 +636,11 @@ class AlertAnalysisWorker:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.enqueue_missing()
+                # Cheap connection/model probes rearm an exhausted outage cycle.
+                if isinstance(self.llm, LLMClient) and time.monotonic() >= self._next_probe:
+                    self._next_probe = time.monotonic() + 60
+                    if self.llm.connection_status()["ok"]:
+                        self.db.retry_provider_analyses(max_attempts=self.settings.ai_analysis_max_attempts)
                 worked = self.process_one()
                 if worked and self._failure_streak == 0:
                     continue  # drain the queue promptly
@@ -636,14 +657,18 @@ class AlertAnalysisWorker:
     def start(self) -> None:
         if self._thread is not None:
             return
+        self.db.recover_processing_analyses(delay_seconds=self.settings.llm_timeout_cooldown_seconds)
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, name="netagent-ai-analysis", daemon=True
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                return False
         self._thread = None
+        return True

@@ -16,11 +16,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, StrictBool
 
 import hashlib
 
 from netagent.config import Settings
-from netagent.database import Database
+from netagent.database import AnalysisQueueFull, Database
 from netagent.schemas import (
     AdminMemoryCreate,
     AdminMemoryRevokeBody,
@@ -458,6 +459,7 @@ def list_ai_analyses(
         None, description="فیلتر وضعیت: PENDING یا PROCESSING یا COMPLETED یا FAILED."
     ),
     limit: int = Query(300, ge=1, le=1000, description="حداکثر تعداد ردیف."),
+    alert_ids: str | None = Query(None, max_length=2400, description="شناسه‌های هشدار جداشده با ویرگول؛ حداکثر ۲۰۰ مورد."),
     authorization: str | None = Header(
         default=None,
         description=(
@@ -476,7 +478,77 @@ def list_ai_analyses(
 ) -> dict[str, Any]:
     db, _ = _ctx(request)
     _guard(request, authorization, x_admin_actor)
+    if alert_ids is not None:
+        try:
+            ids = [int(part) for part in alert_ids.split(",")]
+            if len(ids) > 200 or any(i < 1 for i in ids):
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(422, detail="شناسه‌های هشدار نامعتبر است.")
+        return {"items": [row for aid in dict.fromkeys(ids) if (row := db.get_alert_analysis(aid)) is not None]}
     return {"items": db.list_alert_analyses(status=status, limit=limit)}
+
+
+class SecurityAutoAnalysisBody(BaseModel):
+    enabled: StrictBool
+
+
+@router.get("/security-ai", tags=["مدیریت مدیر شبکه"], summary="وضعیت واقعی صف و کنترل تحلیل امنیت",
+            description="تنظیم ماندگار، شمارش کل صف، آخرین پردازش و بررسی اتصال و وجود مدل؛ بدون تولید پاسخ مدل.",
+            responses={k: v for k, v in _responses("وضعیت تحلیل امنیت.", {"auto_enabled": False,
+                "counts": {"PENDING": 0, "PROCESSING": 0, "COMPLETED": 0, "FAILED": 0},
+                "model": "gemma-4-e4b:latest", "connection": {"ok": False, "detail": "disabled"}}).items() if k != 422})
+def security_ai_status(request: Request) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    llm = request.app.state.llm
+    connection = llm.connection_status() if llm is not None else {"ok": False, "detail": "disabled"}
+    return {**db.analysis_summary(), "model": settings.llm_model,
+            "connection": connection, "worker_enabled": settings.ai_analysis_enabled and llm is not None,
+            "capacity": settings.ai_analysis_backlog_limit}
+
+
+@router.put("/security-ai/automatic", tags=["مدیریت مدیر شبکه"], summary="تغییر ماندگار تحلیل خودکار؛ پیش‌فرض خاموش",
+            description="فقط مدیر؛ تغییر همراه حسابرسی ذخیره می‌شود. روشن‌کردن شامل تاریخچه نمی‌شود و خاموش‌کردن صف قبلی را حفظ می‌کند.",
+            responses=_responses("حالت ذخیره‌شده.", {"auto_enabled": True}))
+def set_security_ai_auto(request: Request, body: SecurityAutoAnalysisBody,
+                        authorization: str | None = Header(default=None, description="توکن مدیر با پیشوند Bearer."),
+                        x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر برای حسابرسی.")) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    return {"auto_enabled": db.set_security_ai_auto(body.enabled, actor=actor)}
+
+
+@router.post("/ai-analyses/{alert_id}/analyze", tags=["مدیریت مدیر شبکه"], summary="تحلیل فقط یک هشدار با جلوگیری از تکرار",
+            description="شناسهٔ پایدار همان هشدار را صف‌بندی می‌کند؛ queued/processing/completed موجود برگردانده می‌شود و شکست اجازهٔ تلاش تازه دارد.",
+            responses={**_responses("رکورد فعلی تحلیل.", {"alert_id": 1, "job_id": "example", "status": "PENDING"},
+                not_found="هشدار وجود ندارد."), 429: {"description": "صف پر است؛ تلاش بعدی با رعایت Retry-After."}})
+def analyze_alert(request: Request, alert_id: int = Path(description="شناسهٔ پایدار هشدار.", ge=1),
+                  authorization: str | None = Header(default=None, description="توکن مدیر با پیشوند Bearer."),
+                  x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر برای حسابرسی.")) -> dict[str, Any]:
+    db, settings = _ctx(request)
+    actor = _guard(request, authorization, x_admin_actor)
+    return _request_analysis(db, settings, alert_id, actor=actor)
+
+
+def _request_analysis(db, settings, alert_id, *, actor, reanalyze=False):
+    try:
+        row = db.request_alert_analysis(alert_id, actor=actor,
+            capacity=settings.ai_analysis_backlog_limit, reanalyze=reanalyze)
+    except AnalysisQueueFull as exc:
+        raise HTTPException(429, detail=str(exc), headers={"Retry-After": "30"}) from exc
+    if row is None:
+        raise HTTPException(404, detail="هشداری با این شناسه وجود ندارد.")
+    return row
+
+
+@router.get("/ai-analyses/{alert_id}/history", tags=["مدیریت مدیر شبکه"], summary="تاریخچهٔ محفوظ تلاش‌های تحلیل",
+            description="نتایج تلاش‌های پیشین که هنگام درخواست صریح retry یا reanalyze بایگانی شدند؛ حذف تاریخچه انجام نمی‌شود.",
+            responses=_responses("تاریخچهٔ تحلیل.", {"items": []}, not_found="هشدار وجود ندارد."))
+def analysis_history(request: Request, alert_id: int = Path(description="شناسهٔ پایدار هشدار.", ge=1)) -> dict[str, Any]:
+    db, _ = _ctx(request)
+    if not db.get_alert(alert_id):
+        raise HTTPException(404, detail="هشداری با این شناسه وجود ندارد.")
+    return {"items": db.alert_analysis_history(alert_id)}
 
 
 @router.post(
@@ -513,13 +585,9 @@ def reanalyze_alert(
         ),
     ),
 ) -> dict[str, Any]:
-    db, _ = _ctx(request)
+    db, settings = _ctx(request)
     actor = _guard(request, authorization, x_admin_actor)
-    ok = db.reset_alert_analysis(alert_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="برای این هشدار تحلیلی ثبت نشده است.")
-    db.record_audit(actor=actor, action="ai_analysis.reanalyze", target=str(alert_id))
-    return {"alert_id": alert_id, "status": "PENDING", "queued": True}
+    return _request_analysis(db, settings, alert_id, actor=actor, reanalyze=True)
 
 
 # ---------------------------------------------------------------------------

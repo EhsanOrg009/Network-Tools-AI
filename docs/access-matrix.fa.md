@@ -23,6 +23,8 @@ Public فقط liveness و رابط مستندات/SPA است. `/health` جزئی
 | GET | `/api/admin/v1/ai-activity/summary` | وضعیت تجمیعی فعالیت مدل محلی | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | GET | `/api/admin/v1/ai-activity/{request_id}` | جزئیات و خط زمانی یک درخواست | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | GET | `/api/admin/v1/ai-analyses` | فهرست تحلیل‌های هوش مصنوعی هشدارهای امنیتی | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
+| POST | `/api/admin/v1/ai-analyses/{alert_id}/analyze` | تحلیل فقط یک هشدار با جلوگیری از تکرار | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده | بالا |
+| GET | `/api/admin/v1/ai-analyses/{alert_id}/history` | تاریخچهٔ محفوظ تلاش‌های تحلیل | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | POST | `/api/admin/v1/ai-analyses/{alert_id}/reanalyze` | درخواست تحلیل مجدد یک هشدار | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده | بالا |
 | GET | `/api/admin/v1/ai-memories` | فهرست حافظه‌ها (دانش تأییدشده و پیش‌نویس‌ها) | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | POST | `/api/admin/v1/ai-memories` | ثبت مستقیم حافظه توسط مدیر (بلافاصله APPROVED) | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده + صف تسک عامل | بالا |
@@ -44,6 +46,8 @@ Public فقط liveness و رابط مستندات/SPA است. `/health` جزئی
 | GET | `/api/admin/v1/enrollment-tokens` | فهرست توکن‌های ثبت‌نام اخیر | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | POST | `/api/admin/v1/enrollment-tokens` | صدور توکن ثبت‌نام یک‌بارمصرف برای عامل جدید | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده | بالا |
 | GET | `/api/admin/v1/networks` | فهرست شبکه‌های کشف‌شده و محدوده‌ی مؤثر اسکن | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
+| GET | `/api/admin/v1/security-ai` | وضعیت واقعی صف و کنترل تحلیل امنیت | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
+| PUT | `/api/admin/v1/security-ai/automatic` | تغییر ماندگار تحلیل خودکار؛ پیش‌فرض خاموش | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده | بالا |
 | GET | `/api/admin/v1/tasks` | فهرست تسک‌ها با فیلتر | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |
 | POST | `/api/admin/v1/tasks` | ایجاد تسک تشخیصی برای یک عامل | Bearer، رد در Backend | فقط توکن مدیر | Admin Full | پایگاه داده + صف تسک عامل | بالا |
 | GET | `/api/admin/v1/tasks/{task_id}` | جزئیات و نتیجه‌ی یک تسک | Bearer، رد در Backend | فقط توکن مدیر | Admin Read Only | پایگاه داده | بالا |

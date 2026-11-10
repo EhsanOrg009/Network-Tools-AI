@@ -149,6 +149,15 @@ class LLMClient:
         return httpx.Timeout(bounded_timeout(self.settings.llm_timeout_seconds),
                              connect=bounded_timeout(self.settings.llm_connect_timeout_seconds))
 
+    def connection_status(self) -> dict:
+        """Read the provider model list without starting a generation."""
+        try:
+            models = self._client.with_options(timeout=self.settings.llm_connect_timeout_seconds).models.list()
+            present = any(item.id == self.model for item in models.data)
+            return {"ok": present, "detail": "ready" if present else "model_not_found"}
+        except Exception as exc:
+            return {"ok": False, "detail": type(exc).__name__}
+
     def __init__(self, settings: Settings):
         self._settings = settings
         self._client = OpenAI(

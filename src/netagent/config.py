@@ -172,8 +172,8 @@ class Settings(BaseSettings):
     ai_analysis_enabled: bool = True
     ai_analysis_max_attempts: int = Field(default=3, ge=1, le=10)
     ai_analysis_poll_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
-    # Upper bound on PENDING rows created per sweep — the queue can grow
-    # gradually but never without bound.
+    # Bounded processing window and manual admission capacity. Automatic
+    # overflow remains in durable intake until there is room; no alert is lost.
     ai_analysis_backlog_limit: int = Field(default=200, ge=10, le=5000)
     # Batch analysis: related alerts (same source IP + same rule + same
     # severity) share one model request to cut request count on weak local
@@ -181,7 +181,7 @@ class Settings(BaseSettings):
     # fall back to individual analysis. 1 disables batching.
     ai_analysis_batch_size: int = Field(default=1, ge=1, le=10)
     # Anti-starvation: every this-many minutes of waiting improves a queued
-    # row's effective priority by one level (bounded), so low-priority events
+    # row's effective priority by one level, so low-priority events
     # eventually get analyzed even under a constant critical-event stream.
     ai_analysis_starvation_minutes: float = Field(
         default=20.0, ge=1.0, le=1440.0

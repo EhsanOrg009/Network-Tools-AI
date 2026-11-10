@@ -73,3 +73,5 @@ worker اجرای تسک پیش‌فرض یک و حداکثر چهار است؛ 
 اصلاح و آزموده شد: شمارش پاسخ Ping از رکورد پاسخ (نه جمع TTL و time)، گزینه‌های Windows/Linux، Nmap discovery/services/OS و reverse DNS با `-6`، و رد IPv6 در arp-scan پیش از اجرا. reverse DNS در collector نیز کنترل Scope دارد. همهٔ عملیات فعال در این آزمون‌ها mock هستند، به‌جز آزمون اتصال محدود و مجاز loopback قبلی.
 
 `uv run pytest tests/test_network_formats.py tests/test_tool_validation.py tests/test_nmap_tools.py tests/test_scope_enforcement.py tests/test_fingerprint.py -q`: **۱۰۸ موفق**.
+
+تصحیح سابقهٔ آزمون: اجرای نخست ۱۰۸ تست موفق بود؛ افزودن کنترل داخل collector، با حذف کنترل قبلی registry، یک تست دفاع چندلایه را شکست داد (۱۰۷ موفق، یک ناموفق). خروجی با تأخیر خوانده شد و commit پیش از بررسی آن ثبت شد. بدون بازنویسی تاریخچه، کنترل registry نیز بازگردانده شد؛ اجرای نهایی مجدد **۱۰۸ موفق** در ۱٫۰۲ ثانیه بود.

@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     # --- arp-scan ---
     arp_scan_timeout: int = Field(default=60, ge=5, le=300)
 
+    # Offline capture access is independent of active network scope.
+    pcap_allowed_dirs: str = ""
+
     # --- Agent loop / investigation budget ---
     max_tool_calls_per_investigation: int = Field(default=10, ge=2, le=30)
     # Overall wall-clock deadline for one investigation; when exceeded a

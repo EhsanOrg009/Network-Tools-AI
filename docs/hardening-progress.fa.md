@@ -75,3 +75,9 @@ worker اجرای تسک پیش‌فرض یک و حداکثر چهار است؛ 
 `uv run pytest tests/test_network_formats.py tests/test_tool_validation.py tests/test_nmap_tools.py tests/test_scope_enforcement.py tests/test_fingerprint.py -q`: **۱۰۸ موفق**.
 
 تصحیح سابقهٔ آزمون: اجرای نخست ۱۰۸ تست موفق بود؛ افزودن کنترل داخل collector، با حذف کنترل قبلی registry، یک تست دفاع چندلایه را شکست داد (۱۰۷ موفق، یک ناموفق). خروجی با تأخیر خوانده شد و commit پیش از بررسی آن ثبت شد. بدون بازنویسی تاریخچه، کنترل registry نیز بازگردانده شد؛ اجرای نهایی مجدد **۱۰۸ موفق** در ۱٫۰۲ ثانیه بود.
+
+### PCAP
+
+اصلاح و آزموده شد: ارجاع تعریف‌نشدهٔ `collectors.tshark` با import صحیح رفع شد؛ `PCAP_ALLOWED_DIRS` خالی پیش‌فرض است و مسیر واقعی فایل باید زیر پوشهٔ مجاز باشد. فایل معمولی، پسوند و اندازه بررسی می‌شوند؛ symlink خارج از مجوز رد می‌شود. تحلیل روی snapshot خصوصی و محدود انجام می‌شود و `-n` از lookup شبکه جلوگیری می‌کند. مجوز PCAP مستقل از Scope اسکن است.
+
+`uv run pytest tests/test_pcap.py tests/test_nmap_tools.py tests/test_tool_validation.py -q`: **۶۰ موفق**، شامل اجرای واقعی registry و TShark نصب‌شده روی PCAP ساختگی Ethernet/IPv4/UDP بدون payload. مسیر نامعتبر، خطای TShark و timeout نیز آزمایش شدند.

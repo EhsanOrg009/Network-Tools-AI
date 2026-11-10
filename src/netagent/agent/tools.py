@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from netagent.collectors import connectivity, system_info
+from netagent.collectors import connectivity, system_info, tshark
 from netagent.config import Settings, binary_available
 from netagent.database import Database
 from netagent.scope import ToolScope, TargetNotAuthorized
@@ -385,8 +385,9 @@ def _run_fingerprint_history(db: Database, settings: Settings, args: dict[str, A
 
 def _run_pcap(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     v = _validate_pcap_args(args)
-    result = collectors.tshark.analyze_pcap(
-        v["path"], timeout=settings.subprocess_timeout_seconds * 2
+    result = tshark.analyze_pcap(
+        v["path"], timeout=settings.subprocess_timeout_seconds * 2,
+        allowed_roots=[p.strip() for p in settings.pcap_allowed_dirs.split(",") if p.strip()],
     )
     result.setdefault("ok", True)
     return result

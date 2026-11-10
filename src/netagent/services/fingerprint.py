@@ -292,6 +292,9 @@ def fingerprint_host(
 ) -> dict[str, Any]:
     """Run the full unprivileged fingerprint pipeline for one host."""
     from netagent.collectors import nmap as nmap_collector
+    from netagent.scope import ToolScope
+
+    ip = ToolScope(settings, []).authorize(ip, host_only=True)
 
     arp_result = system_info.arp_info(ip)
     rdns_result = system_info.reverse_dns(ip)

@@ -220,13 +220,8 @@ class Orchestrator:
                 meta,
             )
 
-        # The explicitly requested target is authorized for this investigation;
-        # everything else must fall inside the configured scope (extended by
-        # policy-eligible auto-discovered networks via ToolScope.db).
-        extra_targets = []
-        if evidence.get("target_ip"):
-            extra_targets.append(str(evidence["target_ip"]))
-        scope = ToolScope(settings=self.settings, extra_targets=extra_targets, db=self.db)
+        # Observed evidence never grants authorization for active operations.
+        scope = ToolScope(settings=self.settings, extra_targets=[], db=self.db)
 
         system = prompts.system_prompt(
             tool_catalog_docs(self.registry),

@@ -173,7 +173,7 @@ def test_public_never_authorized_even_if_reported(settings, db):
 
 
 def test_scan_endpoint_rejects_public_target(full_client):
-    r = full_client.post("/api/scans", json={"tool": "nmap", "target": "8.8.8.0/24"})
+    r = full_client.post("/api/scans", json={"tool": "nmap", "target": "8.8.8.0/24"}, headers=admin_headers())
     assert r.status_code == 403
 
 

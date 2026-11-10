@@ -33,8 +33,7 @@ _ROOT_MARKERS = (
 )
 
 
-class TargetNotAuthorized(ValueError):
-    """Target lies outside the configured authorized scope."""
+from netagent.scope import ToolScope, TargetNotAuthorized
 
 
 class NmapUnavailable(RuntimeError):
@@ -49,39 +48,7 @@ def validate_discovery_target(
     ``extra_networks`` (auto-discovered eligible networks) EXTENDS the
     configured scope; it never replaces or broadens it silently.
     """
-    target = (target or "").strip()
-    # Hostnames are not accepted for network scans: only IPs/CIDRs that can
-    # be proven inside an authorized range.
-    if not target or any(ch.isspace() for ch in target) or target.startswith("-"):
-        raise TargetNotAuthorized(f"invalid target: {target[:64]!r}")
-    try:
-        candidate = ipaddress.ip_network(target, strict=False)
-    except ValueError:
-        try:
-            candidate = ipaddress.ip_network(f"{target}/32", strict=False)
-        except ValueError as exc:
-            raise TargetNotAuthorized(
-                f"target is not an IP or CIDR: {target[:64]!r}"
-            ) from exc
-    if not settings.is_target_authorized(str(candidate)):
-        authorized = False
-        for raw in extra_networks or []:
-            try:
-                net = ipaddress.ip_network(raw, strict=False)
-            except ValueError:
-                continue
-            if candidate.version == net.version and candidate.subnet_of(net):
-                authorized = True
-                break
-        if not authorized:
-            raise TargetNotAuthorized(
-                f"target {candidate} outside authorized scope "
-                f"(MONITOR_CIDRS/AUTHORIZED_TARGETS): {settings.scope_description()}"
-            )
-    # Host-level targets normalize to a bare IP (see ToolScope.authorize).
-    if candidate.prefixlen == candidate.max_prefixlen:
-        return str(candidate.network_address)
-    return str(candidate)
+    return ToolScope(settings, extra_networks or []).authorize(target)
 
 
 def validate_port_list(settings: Settings, ports: list[int] | None) -> list[int]:

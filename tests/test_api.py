@@ -259,12 +259,12 @@ def test_host_timeline_endpoint(client, db):
 
 def test_host_diagnostics_recorded_by_tools(client, db, monkeypatch):
     """Tool invocations are persisted to diagnostics for later review."""
-    def fake_ping(s, host, count=None):
+    def fake_ping(s, host, count=None, **kwargs):
         return {"target": host, "ok": True, "responses": 3}
 
     monkeypatch.setattr("netagent.collectors.connectivity.ping", fake_ping)
-    client.post("/api/tools/ping", json={"host": "127.0.0.1"})
-    rows = db.host_diagnostics("127.0.0.1")
+    client.post("/api/tools/ping", json={"host": "192.168.1.10"})
+    rows = db.host_diagnostics("192.168.1.10")
     assert any(r["tool"] == "ping" for r in rows)
 
 

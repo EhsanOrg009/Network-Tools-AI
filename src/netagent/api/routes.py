@@ -1015,6 +1015,8 @@ def discover_hosts(request: Request, body: ScanRequest) -> dict[str, Any]:
             )
     except TargetNotAuthorized as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    if result.get("unauthorized"):
+        raise HTTPException(status_code=403, detail=result["error"])
     for host in result.get("hosts", []):
         db.upsert_host(host["ip"])
     return result
@@ -1108,7 +1110,7 @@ def invoke_tool(
     scope = ToolScope(settings=settings, extra_targets=[], db=db)
     result = execute_tool(registry, db, settings, tool_name, args or {}, scope)
     error = str(result.get("error", ""))
-    if not result.get("ok") and ("خارج از محدوده" in error or "outside authorized scope" in error):
+    if result.get("unauthorized") or (not result.get("ok") and ("خارج از محدوده" in error or "outside authorized scope" in error)):
         raise HTTPException(status_code=403, detail=error)
     return result
 

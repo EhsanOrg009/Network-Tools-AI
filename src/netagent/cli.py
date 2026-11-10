@@ -115,7 +115,7 @@ def _cmd_fingerprint(args: argparse.Namespace) -> int:
     settings = load_settings()
     db = Database(settings.database_path)
     try:
-        ToolScope(settings=settings, extra_targets=[args.ip]).authorize(args.ip)
+        ToolScope(settings=settings, extra_targets=[]).authorize(args.ip)
     except ValueError as exc:
         db.close()
         print(f"هدف خارج از محدوده‌ی مجاز است: {exc}", file=sys.stderr)

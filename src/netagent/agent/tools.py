@@ -3,8 +3,8 @@
 Policy (v2): every non-destructive diagnostic tool is enabled by default.
 There are no per-tool feature flags. The single authorization gate is the
 configured *scope* (MONITOR_CIDRS ∪ AUTHORIZED_TARGETS), validated inside
-each target-taking tool. The explicit target of a user-started investigation
-is additionally authorized for that investigation (see ToolScope).
+each target-taking tool. Observed or model-selected targets never grant
+authorization. Only low-impact discovery can use policy-eligible networks.
 
 Hard invariants:
 - Model output never reaches a shell; subprocesses use argument lists built
@@ -24,70 +24,7 @@ from typing import Any, Callable
 from netagent.collectors import connectivity, system_info
 from netagent.config import Settings, binary_available
 from netagent.database import Database
-
-
-@dataclass
-class ToolScope:
-    """Authorization context for one tool execution.
-
-    ``extra_targets`` holds explicitly authorized individual targets (e.g. the
-    target of the current investigation), layered on top of the configured
-    scope. When ``db`` is provided, policy-eligible auto-discovered networks
-    additionally extend the scope (they never replace it).
-    """
-
-    settings: Settings
-    extra_targets: list[str]
-    db: "Database | None" = None
-
-    def _discovered_authorized(self, candidate: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
-        if self.db is None:
-            return False
-        try:
-            from netagent.services.discovery import auto_discovery_eligible_networks
-            import ipaddress as _ipa
-
-            for entry in auto_discovery_eligible_networks(self.db, self.settings):
-                net = _ipa.ip_network(entry["cidr"], strict=False)
-                if candidate.version == net.version and candidate.subnet_of(net):
-                    return True
-        except Exception:
-            return False
-        return False
-
-    def authorize(self, target: str) -> str:
-        """Return the normalized target if authorized, else raise ValueError."""
-        s = self.settings
-        target = (target or "").strip()
-        if not target or any(ch.isspace() for ch in target) or target.startswith("-"):
-            raise ValueError(f"invalid target: {target[:64]!r}")
-        try:
-            candidate = ipaddress.ip_network(target, strict=False)
-        except ValueError:
-            try:
-                candidate = ipaddress.ip_network(f"{target}/32", strict=False)
-            except ValueError as exc:
-                raise ValueError(f"target is not an IP or CIDR: {target[:64]!r}") from exc
-        # Explicitly authorized individual targets (normalize both sides).
-        for extra in self.extra_targets:
-            try:
-                if candidate == ipaddress.ip_network(extra.strip(), strict=False):
-                    break
-            except ValueError:
-                continue
-        else:
-            if not s.is_target_authorized(str(candidate)) and \
-                    not self._discovered_authorized(candidate):
-                raise ValueError(
-                    f"target {candidate} خارج از محدوده‌ی مجاز است؛ "
-                    f"scope پیکربندی‌شده: {s.scope_description()}"
-                )
-        # Host-level targets normalize to a bare IP so downstream consumers
-        # (arp_info, reverse_dns, DB joins against event IPs) see "1.2.3.4",
-        # never "1.2.3.4/32".
-        if candidate.prefixlen == candidate.max_prefixlen:
-            return str(candidate.network_address)
-        return str(candidate)
+from netagent.scope import ToolScope, TargetNotAuthorized
 
 
 @dataclass
@@ -119,11 +56,11 @@ def _validate_tcp_args(args: dict[str, Any], settings: Settings) -> dict[str, An
     return {"host": str(host), "port": port}
 
 
-def _validate_target_arg(args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
+def _validate_target_arg(args: dict[str, Any], scope: ToolScope, *, discovery: bool = False) -> dict[str, Any]:
     target = args.get("target") or args.get("cidr") or args.get("ip")
     if not target:
         raise ValueError("target is required")
-    return {"target": scope.authorize(str(target))}
+    return {"target": scope.authorize(str(target), discovery=discovery)}
 
 
 def _validate_ports_arg(args: dict[str, Any], settings: Settings) -> list[int] | None:
@@ -234,16 +171,18 @@ def _run_endpoint_status(db: Database, settings: Settings, args: dict[str, Any])
             "note": "stale یعنی ضربان اخیر دریافت نشده؛ اثبات خاموشی نیست."}
 
 
-def _run_ping(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
+def _run_ping(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
     v = _validate_ping_args(args)
-    result = connectivity.ping(settings, v["host"])
+    v["host"] = scope.authorize(v["host"], hostname=True, host_only=True)
+    result = connectivity.ping(settings, v["host"], scope=scope)
     db.record_observation(v["host"], "ping", bool(result.get("ok")), result)
     return result
 
 
-def _run_tcp(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
+def _run_tcp(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
     v = _validate_tcp_args(args, settings)
-    result = connectivity.tcp_check(settings, v["host"], v["port"])
+    v["host"] = scope.authorize(v["host"], hostname=True, host_only=True)
+    result = connectivity.tcp_check(settings, v["host"], v["port"], scope=scope)
     db.record_observation(
         v["host"], "tcp", bool(result.get("ok")),
         {"target": v["host"], "port": v["port"], "ok": result.get("ok"),
@@ -254,8 +193,8 @@ def _run_tcp(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str
 
 def _run_nmap_discovery(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
     from netagent.collectors.nmap import host_discovery
-    v = _validate_target_arg(args, scope)
-    return host_discovery(settings, v["target"])
+    v = _validate_target_arg(args, scope, discovery=True)
+    return host_discovery(settings, v["target"], extra_networks=scope.networks(discovery=True))
 
 
 def _run_nmap_services(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
@@ -285,7 +224,7 @@ def _run_nmap_os(db: Database, settings: Settings, args: dict[str, Any], scope: 
 def _run_arp_scan(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
     import subprocess
 
-    v = _validate_target_arg(args, scope)
+    v = _validate_target_arg(args, scope, discovery=True)
     started = time.monotonic()
     try:
         proc = subprocess.run(  # noqa: S603 - fixed args, validated CIDR, no shell
@@ -415,11 +354,11 @@ def _run_route_info(db: Database, settings: Settings, args: dict[str, Any]) -> d
     return system_info.route_info()
 
 
-def _run_reverse_dns(db: Database, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
+def _run_reverse_dns(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
     ip = args.get("ip") or args.get("host")
     if not ip:
         raise ValueError("ip is required")
-    return system_info.reverse_dns(str(ip)[:64])
+    return system_info.reverse_dns(scope.authorize(str(ip), host_only=True))
 
 
 def _run_fingerprint(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:
@@ -479,7 +418,7 @@ def build_registry(settings: Settings) -> dict[str, ToolSpec]:
             parameters={"host": "string (required)", "count": "int optional (<=3)"},
             available=lambda s: True,
             unavailable_message="",
-            run=lambda db, s, args, scope: _run_ping(db, s, args),
+            run=lambda db, s, args, scope: _run_ping(db, s, args, scope),
             cost="cheap",
         ),
         "tcp_check": ToolSpec(
@@ -488,7 +427,7 @@ def build_registry(settings: Settings) -> dict[str, ToolSpec]:
             parameters={"host": "string (required)", "port": "int 1-65535 (required)"},
             available=lambda s: True,
             unavailable_message="",
-            run=lambda db, s, args, scope: _run_tcp(db, s, args),
+            run=lambda db, s, args, scope: _run_tcp(db, s, args, scope),
             cost="cheap",
         ),
         "nmap_discovery": ToolSpec(
@@ -564,7 +503,7 @@ def build_registry(settings: Settings) -> dict[str, ToolSpec]:
             parameters={"ip": "string (required)"},
             available=_nmap_available,
             unavailable_message="nmap نصب نیست.",
-            run=lambda db, s, args, scope: _run_reverse_dns(db, s, args),
+            run=lambda db, s, args, scope: _run_reverse_dns(db, s, args, scope),
             cost="cheap",
         ),
         "suricata_alerts": ToolSpec(
@@ -703,6 +642,8 @@ def execute_tool(
     effective_scope = scope or ToolScope(settings=settings, extra_targets=[])
     try:
         result = spec.run(db, settings, args or {}, effective_scope)
+    except TargetNotAuthorized as exc:
+        result = {"ok": False, "unauthorized": True, "error": str(exc)}
     except (ValueError, TypeError) as exc:
         result = {"ok": False, "error": f"آرگومان نامعتبر: {exc}"}
     except Exception as exc:  # defensive: never leak a crash into the loop

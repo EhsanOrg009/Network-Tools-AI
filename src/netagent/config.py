@@ -7,8 +7,8 @@ Policy model (v2):
 - All non-destructive diagnostic tools are enabled by default. There are no
   per-tool feature flags for nmap / arp-scan anymore.
 - The single authorization gate is the configured *scope*:
-  MONITOR_CIDRS + AUTHORIZED_TARGETS (+ the explicit target of a user-started
-  investigation). Targets outside the scope are rejected everywhere.
+  MONITOR_CIDRS + AUTHORIZED_TARGETS. Targets outside the scope are rejected;
+  policy-derived networks apply only to low-impact discovery.
 - Missing executables / missing OS capabilities (e.g. nmap -O needs root)
   are detected and reported explicitly; unprivileged alternatives are used
   where possible.
@@ -277,11 +277,13 @@ class Settings(BaseSettings):
     def is_target_authorized(self, target: str) -> bool:
         """True when *target* (IP or CIDR) fits inside the authorized scope:
         MONITOR_CIDRS ∪ AUTHORIZED_TARGETS."""
+        from netagent.scope import normalized_network
         try:
-            addr = ipaddress.ip_network(target, strict=False)
+            addr = normalized_network(target)
         except ValueError:
             return False
         for net in self.monitor_cidr_list + self.authorized_target_list:
+            net = normalized_network(str(net))
             if addr.version == net.version and addr.subnet_of(net):
                 return True
         return False

@@ -82,8 +82,8 @@ def test_out_of_scope_targets_rejected_by_registry(settings, db):
     assert "خارج از محدوده" in result["error"]
 
 
-def test_explicit_investigation_target_is_authorized(settings, db):
-    """A user-started investigation target is authorized even outside CIDRs."""
+def test_explicit_scope_grant_is_authorized(settings, db):
+    """Trusted callers can grant a target; evidence cannot create that grant."""
     registry = build_registry(settings)
     scope = ToolScope(settings=settings, extra_targets=["203.0.113.5"])
     # 203.0.113.5 is inside TEST-NET-3; never scanned here — monkeypatch run.
@@ -112,6 +112,7 @@ def test_registry_rejects_unknown_tool(settings, db):
 
 def test_tcp_check_loopback_safe_port(settings, db):
     """Single TCP connect to loopback (never a remote network operation)."""
+    settings.authorized_targets = "127.0.0.1"
     registry = build_registry(settings)
     result = execute_tool(registry, db, settings, "tcp_check",
                           {"host": "127.0.0.1", "port": 9})
@@ -130,6 +131,7 @@ def test_tcp_check_rejects_out_of_range_port(settings, db):
 
 def test_tcp_check_extra_model_fields_are_ignored(settings, db):
     """Model-provided extra keys must not change the executed call."""
+    settings.authorized_targets = "127.0.0.1"
     registry = build_registry(settings)
     result = execute_tool(
         registry, db, settings, "tcp_check",
@@ -142,7 +144,7 @@ def test_tcp_check_extra_model_fields_are_ignored(settings, db):
 def test_ping_arguments_validation(settings, db, monkeypatch):
     calls = []
 
-    def fake_ping(s, host, count=None):
+    def fake_ping(s, host, count=None, **kwargs):
         calls.append(host)
         return {"target": host, "ok": True, "responses": 3}
 

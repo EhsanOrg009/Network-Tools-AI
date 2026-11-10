@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+import ipaddress
 import socket
 import subprocess
 import time
 from typing import Any
 
 from netagent.config import Settings
+from netagent.scope import ToolScope
 
 # Hostnames/IPs only. Rejects anything that could be interpreted as an option
 # (leading dash), spaces, shell metacharacters, etc.
@@ -18,6 +20,11 @@ _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,250}[A-Za-z0-9])?$")
 def validate_host(host: str) -> str:
     """Return the validated host, or raise ValueError for unsafe input."""
     host = (host or "").strip()
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
     if not host or len(host) > 253 or not _HOST_RE.match(host):
         raise ValueError(f"unsafe or invalid host: {host[:64]!r}")
     return host
@@ -27,13 +34,14 @@ def ping(
     settings: Settings,
     host: str,
     count: int | None = None,
+    *, scope: ToolScope | None = None,
 ) -> dict[str, Any]:
     """ICMP reachability check with a small, fixed number of requests.
 
     A failed ping is NOT proof that a device is offline (ICMP may be dropped
     by firewalls); the caller must treat this as weak evidence.
     """
-    host = validate_host(host)
+    host = (scope or ToolScope(settings, [])).authorize(host, hostname=True, host_only=True)
     count = count or settings.ping_count
     count = max(1, min(int(count), settings.ping_count))
     timeout = settings.ping_timeout_seconds
@@ -81,11 +89,12 @@ def ping(
     }
 
 
-def tcp_check(settings: Settings, host: str, port: int, timeout: float = 3.0) -> dict[str, Any]:
+def tcp_check(settings: Settings, host: str, port: int, timeout: float = 3.0,
+              *, scope: ToolScope | None = None) -> dict[str, Any]:
     """TCP connectivity to ONE host on ONE port. A single connect() is a
     non-destructive diagnostic and is allowed by default; the host must be a
     validated single host (no ranges, no options)."""
-    host = validate_host(host)
+    host = (scope or ToolScope(settings, [])).authorize(host, hostname=True, host_only=True)
     if not 1 <= int(port) <= 65535:
         raise ValueError(f"port out of range: {port}")
     timeout = max(0.5, min(float(timeout), 10.0))

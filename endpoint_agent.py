@@ -41,11 +41,15 @@ import platform
 import random
 import re
 import secrets
+import signal
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
 import threading
+import queue
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -91,12 +95,16 @@ class State:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self.data, ensure_ascii=False, indent=2)
-        self.path.write_text(payload, encoding="utf-8")
-        if os.name == "posix":
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
+                                         prefix=self.path.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.replace(temporary, self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # convenience accessors ---------------------------------------------------
 
@@ -120,6 +128,123 @@ class State:
 
 
 MAX_SEEN_NONCES = 200
+
+
+class ResultSpool:
+    """Private durable execution journal and result outbox (stdlib only).
+
+    Unacknowledged results never expire. Acknowledged payloads are removed;
+    execution tombstones survive at least the task expiry plus thirty days.
+    """
+
+    def __init__(self, state_path: Path, max_pending=128, max_bytes=64 * 1024 * 1024):
+        self.directory = state_path.with_name(state_path.name + ".spool")
+        if self.directory.is_symlink():
+            raise ValueError("spool directory must not be a symlink")
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name == "posix":
+            if self.directory.stat().st_uid != os.getuid():
+                raise PermissionError("spool must belong to the agent service account")
+            self.directory.chmod(0o700)
+        self.path = self.directory / "results.sqlite3"
+        if self.path.is_symlink():
+            raise ValueError("spool database must not be a symlink")
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(fd)
+        if os.name == "posix":
+            self.path.chmod(0o600)
+        self.lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA secure_delete=ON")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS executions (
+                task_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+                result_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+                started_epoch REAL NOT NULL, expires_epoch REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS results (
+                result_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,
+                agent_id TEXT NOT NULL, execution_status TEXT NOT NULL,
+                payload_json TEXT NOT NULL, created_epoch REAL NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                delivery_status TEXT NOT NULL DEFAULT 'pending',
+                next_retry_epoch REAL NOT NULL DEFAULT 0, last_error TEXT
+            );
+        """)
+        self.max_pending, self.max_bytes = max_pending, max_bytes
+
+    def has_capacity(self):
+        with self.lock:
+            pending, size = self.db.execute("SELECT count(*), coalesce(sum(length(payload_json)),0) FROM results").fetchone()
+            running = self.db.execute("SELECT count(*) FROM executions WHERE status='RUNNING'").fetchone()[0]
+            return pending + running < self.max_pending and size + (running + 1) * 8 * 1024 * 1024 <= self.max_bytes
+
+    def begin(self, task_id, agent_id, expires_epoch=None):
+        with self.lock, self.db:
+            if self.db.execute("SELECT 1 FROM executions WHERE task_id=?", (task_id,)).fetchone():
+                return False
+            if not self.has_capacity():
+                raise RuntimeError("result spool full; task execution paused")
+            self.db.execute("INSERT INTO executions VALUES(?,?,?,'RUNNING',?,?)",
+                            (task_id, agent_id, uuid.uuid4().hex, time.time(), expires_epoch or time.time() + 86400))
+            return True
+
+    def put(self, task_id, agent_id, payload, *, max_output_bytes=256 * 1024):
+        with self.lock, self.db:
+            execution = self.db.execute("SELECT * FROM executions WHERE task_id=?", (task_id,)).fetchone()
+            if execution is None:
+                self.begin(task_id, agent_id)
+                execution = self.db.execute("SELECT * FROM executions WHERE task_id=?", (task_id,)).fetchone()
+            if execution["agent_id"] != agent_id:
+                raise ValueError("result belongs to another agent")
+            result = json.dumps(payload.get("result") or {}, ensure_ascii=False, default=str)
+            if len(result.encode()) > max_output_bytes:
+                payload = {**payload, "result": {"truncated": True, "excerpt": result[:max_output_bytes // 4]}}
+            payload = {**payload, "error": str(payload.get("error"))[:1000] if payload.get("error") else None,
+                       "result_id": execution["result_id"]}
+            self.db.execute("INSERT OR IGNORE INTO results(result_id, task_id, agent_id, execution_status, payload_json, created_epoch) VALUES(?,?,?,?,?,?)",
+                            (execution["result_id"], task_id, agent_id, "COMPLETED" if payload["ok"] else "FAILED",
+                             json.dumps(payload, ensure_ascii=False, default=str), time.time()))
+            self.db.execute("UPDATE executions SET status='FINISHED' WHERE task_id=?", (task_id,))
+            return execution["result_id"]
+
+    def recover_interrupted(self, agent_id):
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM executions WHERE agent_id=? AND status='RUNNING'", (agent_id,)).fetchall()
+            for row in rows:
+                self.put(row["task_id"], agent_id, {"ok": False, "result": {"interrupted": True},
+                         "error": "agent stopped during task execution; task was not re-executed"})
+
+    def due(self, agent_id, limit=8):
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM results WHERE agent_id=? AND next_retry_epoch <= ? ORDER BY created_epoch LIMIT ?",
+                (agent_id, time.time(), limit)).fetchall()]
+
+    def failed_delivery(self, result_id, error):
+        with self.lock, self.db:
+            row = self.db.execute("SELECT retry_count FROM results WHERE result_id=?", (result_id,)).fetchone()
+            if row:
+                attempt = row[0] + 1
+                delay = min(300, 2 ** min(attempt, 9)) + random.uniform(0, 1)
+                self.db.execute("UPDATE results SET retry_count=?, delivery_status='retry', next_retry_epoch=?, last_error=? WHERE result_id=?",
+                                (attempt, time.time() + delay, str(error)[:300], result_id))
+
+    def acknowledge(self, row, response):
+        expected = {"status": "stored", "result_id": row["result_id"],
+                    "task_id": row["task_id"], "agent_id": row["agent_id"]}
+        if response.get("ack") != expected:
+            return False
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM results WHERE result_id=? AND agent_id=?", (row["result_id"], row["agent_id"]))
+            self.db.execute("UPDATE executions SET status='DELIVERED' WHERE task_id=?", (row["task_id"],))
+            self.db.execute("DELETE FROM executions WHERE status='DELIVERED' AND expires_epoch < ?", (time.time() - 30 * 86400,))
+        return True
+
+    def close(self):
+        with self.lock:
+            self.db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1145,6 +1270,116 @@ class EndpointAgent:
         self.last_heartbeat = 0.0
         self.last_inventory = 0.0
         self.last_inventory_payload: dict | None = None
+        self.spool: ResultSpool | None = None
+        self.max_workers = min(4, max(1, int(getattr(args, "task_workers", 1))))
+        self._task_queue = queue.Queue(maxsize=self.max_workers)
+        self._control_queue = queue.Queue(maxsize=2)
+        self._slots = threading.BoundedSemaphore(self.max_workers)
+        self._stop = threading.Event()
+        self._workers: list[threading.Thread] = []
+        self._delivery_lock = threading.Lock()
+        self._execution_lock = threading.Lock()
+        self._instance_lock_file = None
+
+    def _ensure_spool(self):
+        if self.spool is None:
+            self.spool = ResultSpool(self.state.path)
+        return self.spool
+
+    def _start_workers(self):
+        if self._workers:
+            return
+        spool = self._ensure_spool()
+        self._instance_lock_file = (spool.directory / "agent.lock").open("a+b")
+        try:
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(self._instance_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                import msvcrt
+                self._instance_lock_file.seek(0)
+                self._instance_lock_file.write(b"0")
+                self._instance_lock_file.flush()
+                self._instance_lock_file.seek(0)
+                msvcrt.locking(self._instance_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            self._instance_lock_file.close()
+            self._instance_lock_file = None
+            raise RuntimeError("another agent instance owns this spool")
+        spool.recover_interrupted(self.state.agent_id or "")
+        self._stop.clear()
+        for index in range(self.max_workers):
+            worker = threading.Thread(target=self._task_worker, args=(self._task_queue, False),
+                                      name=f"endpoint-task-{index}", daemon=True)
+            self._workers.append(worker)
+        self._workers.append(threading.Thread(target=self._task_worker, args=(self._control_queue, True),
+                                             name="endpoint-cancellation", daemon=True))
+        self._workers.append(threading.Thread(target=self._delivery_worker,
+                                             name="endpoint-results", daemon=True))
+        for worker in self._workers:
+            worker.start()
+
+    def _task_worker(self, work_queue, control):
+        while not self._stop.is_set() or not work_queue.empty():
+            try:
+                message = work_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                self._execute_task_message(message)
+            except Exception as exc:
+                # Execution is journaled. A disk failure must never trigger a
+                # repeat execution, nor silently kill the worker.
+                print(f"task persistence failed: {type(exc).__name__}", file=sys.stderr)
+                self._stop.set()
+            finally:
+                if not control:
+                    self._slots.release()
+                work_queue.task_done()
+
+    def _delivery_worker(self):
+        while not self._stop.is_set():
+            try:
+                self.deliver_results()
+            except (sqlite3.Error, OSError) as exc:
+                print(f"result spool unavailable: {type(exc).__name__}", file=sys.stderr)
+            self._stop.wait(1)
+
+    def deliver_results(self):
+        if not self._delivery_lock.acquire(blocking=False):
+            return
+        try:
+            spool = self._ensure_spool()
+            for row in spool.due(self.state.agent_id or ""):
+                try:
+                    response = self.api().request("POST", f"/api/agent/v1/tasks/{row['task_id']}/result",
+                                                  payload=json.loads(row["payload_json"]))
+                    if not spool.acknowledge(row, response):
+                        raise ApiError(0, "server acknowledgment does not match this result")
+                except (ApiError, OSError, ValueError) as exc:
+                    spool.failed_delivery(row["result_id"], exc)
+                    print(f"result delivery deferred: {type(exc).__name__}", file=sys.stderr)
+        finally:
+            self._delivery_lock.release()
+
+    def shutdown(self, timeout=30.0):
+        if self.spool is None and not self._workers:
+            return
+        self._stop.set()
+        deadline = time.monotonic() + timeout
+        for worker in self._workers:
+            worker.join(timeout=max(0, deadline - time.monotonic()))
+        for session_id in list(self.console.sessions):
+            self.console.terminate(session_id)
+        if not any(worker.is_alive() for worker in self._workers):
+            self.deliver_results()
+            if self.spool:
+                self.spool.close()
+                self.spool = None
+            self._workers.clear()
+            if self._instance_lock_file:
+                self._instance_lock_file.close()
+                self._instance_lock_file = None
 
     # -- capabilities ----------------------------------------------------------
 
@@ -1349,11 +1584,26 @@ class EndpointAgent:
             print(f"traffic collector error: {exc}", file=sys.stderr)
 
     def poll_and_execute_task(self) -> None:
-        response = self.api().request("GET", "/api/agent/v1/tasks/next")
-        message = response.get("task")
-        if not message:
+        if self._stop.is_set() or not self._ensure_spool().has_capacity():
             return
-        self._execute_task_message(message)
+        self.console.reap()
+        normal_slot = self._slots.acquire(blocking=False)
+        if not normal_slot and self._control_queue.full():
+            return
+        try:
+            path = "/api/agent/v1/tasks/next" + ("" if normal_slot else "?control_only=true")
+            response = self.api().request("GET", path)
+            message = response.get("task")
+            if not message:
+                return
+            if not normal_slot and message.get("type") != "console_terminate":
+                self._submit_result(message.get("task_id"), False, None, "server does not support control-only polling")
+                return
+            (self._task_queue if normal_slot else self._control_queue).put_nowait(message)
+            normal_slot = False
+        finally:
+            if normal_slot:
+                self._slots.release()
 
     # -- task execution ---------------------------------------------------------
 
@@ -1361,10 +1611,12 @@ class EndpointAgent:
         task_id = message.get("task_id") or "unknown"
         ttype = message.get("type", "")
         started_epoch = time.time()
-        if not self.state.remember_task(str(task_id)):
-            self._submit_result(task_id, False, None,
-                                "duplicate task rejected (already executed)")
-            return
+        with self._execution_lock:
+            if str(task_id) in self.state.data.get("executed_task_ids", []):
+                return
+            if not self._ensure_spool().begin(str(task_id), self.state.agent_id or "",
+                    (message.get("envelope") or {}).get("expires_epoch")):
+                return
         if ttype in ("admin_python_script", "console_session",
                      "console_command", "console_terminate", "screen_capture"):
             ok, reason = verify_envelope(
@@ -1391,7 +1643,7 @@ class EndpointAgent:
         result, ok = self._dispatch_by_type(ttype, message.get("params") or {},
                                             message.get("timeout_seconds"))
         self._submit_result(task_id, ok, result, None if ok else (result or {}).get("error"),
-                            started_epoch=started_epoch)
+                            started_epoch=started_epoch, max_output_bytes=8 * 1024 * 1024 if ttype == "screen_capture" else 256 * 1024)
 
     def _dispatch_by_type(self, ttype: str, params: dict, timeout_seconds) -> tuple[dict, bool]:
         try:
@@ -1443,7 +1695,8 @@ class EndpointAgent:
             return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"[:300]}, False
 
     def _submit_result(self, task_id: str, ok: bool, result: dict | None,
-                       error: str | None, started_epoch: float | None = None) -> None:
+                       error: str | None, started_epoch: float | None = None,
+                       max_output_bytes: int = 256 * 1024) -> None:
         body = {
             "ok": bool(ok),
             "result": result or {},
@@ -1452,16 +1705,24 @@ class EndpointAgent:
             "started_at_epoch": started_epoch,
             "finished_at_epoch": time.time(),
         }
-        try:
-            self.api().request("POST", f"/api/agent/v1/tasks/{task_id}/result", payload=body)
-        except ApiError as exc:
-            # 409 = already recorded centrally: acceptable, keep the state mark
-            if exc.status != 409:
-                print(f"submit result failed: {exc}", file=sys.stderr)
+        self._ensure_spool().put(task_id, self.state.agent_id or "", body, max_output_bytes=max_output_bytes)
 
     # -- main loop ---------------------------------------------------------------
 
     def run(self, once: bool = False) -> int:
+        previous_term = None
+        if threading.current_thread() is threading.main_thread():
+            previous_term = signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
+        try:
+            return self._run_loop(once)
+        except KeyboardInterrupt:
+            return 0
+        finally:
+            self.shutdown()
+            if previous_term is not None:
+                signal.signal(signal.SIGTERM, previous_term)
+
+    def _run_loop(self, once: bool = False) -> int:
         client = self.api()
         if not self.state.agent_id or not self.state.agent_token:
             # No credential yet: introduce this endpoint automatically and let
@@ -1479,7 +1740,7 @@ class EndpointAgent:
                 return 2
         attempt = 0
         last_claim_poll = 0.0
-        while True:
+        while not self._stop.is_set():
             try:
                 if not self.state.agent_token:
                     # pre-enrollment: poll the registration decision on a slow
@@ -1493,6 +1754,7 @@ class EndpointAgent:
                         if outcome == 2:
                             return 2
                 if self.state.agent_token:
+                    self._start_workers()
                     if time.time() - self.last_heartbeat >= self.heartbeat_interval:
                         hb = self.heartbeat()
                         # the server may adjust the cadence centrally (e.g.
@@ -1508,17 +1770,20 @@ class EndpointAgent:
                     self.poll_and_execute_task()
                 attempt = 0
             except ApiError as exc:
+                if once:
+                    return 2
                 attempt += 1
                 delay = min(30.0, 2.0 * (2 ** min(attempt, 5))) + random.uniform(0, 1.5)
                 print(f"خطای ارتباط ({exc}); تلاش دوباره در {delay:.1f}s", file=sys.stderr)
-                time.sleep(delay)
+                self._stop.wait(delay)
                 continue
             except SystemExit as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
             if once:
                 return 0
-            time.sleep(self.poll_interval)
+            self._stop.wait(self.poll_interval)
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1550,6 +1815,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--heartbeat-interval", type=int, default=30)
     run.add_argument("--inventory-interval", type=int, default=300)
     run.add_argument("--poll-interval", type=float, default=5.0)
+    run.add_argument("--task-workers", type=int, default=1, choices=range(1, 5),
+                     help="تعداد worker اجرای تسک؛ پیش‌فرض یک، حداکثر چهار")
     run.add_argument("--once", action="store_true", help="فقط یک دور اجرا کن")
     run.add_argument("--allow-admin-exec", action="store_true",
                      help="اجازه‌ی اجرای اسکریپت پایتون مدیریتی امضاشده (پیش‌فرض: خاموش)")

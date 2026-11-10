@@ -212,6 +212,7 @@ def dispatch_task(
     agent: dict[str, Any],
     *,
     supported_types: list[str] | None = None,
+    control_only: bool = False,
 ) -> dict[str, Any] | None:
     """Claim the next runnable task for one agent and shape the wire message.
 
@@ -239,6 +240,8 @@ def dispatch_task(
             if not (settings.task_signing_key or "").strip():
                 continue
         allowed.update(types)
+    if control_only:
+        allowed &= {"console_terminate"}
     task = db.claim_next_task(agent["id"], allowed_types=sorted(allowed))
     if task is None:
         return None
@@ -269,40 +272,54 @@ def dispatch_task(
 
 
 def complete_task_from_agent(
-    db: Database,
-    settings: Settings,
-    *,
-    agent: dict[str, Any],
-    task_id: str,
-    ok: bool,
-    result: dict[str, Any] | None,
-    error: str | None,
+    db: Database, settings: Settings, *, agent: dict[str, Any], task_id: str,
+    ok: bool, result: dict[str, Any] | None, error: str | None,
+    result_id: str | None = None,
 ) -> dict[str, Any]:
-    """Store a task result; reject results for foreign agents' tasks or
-    tasks that are not in the dispatched state (duplicate submission)."""
-    task = db.get_task(task_id)
-    if task is None:
-        raise TaskError("task not found")
-    if task["agent_id"] != agent["id"]:
-        raise TaskError("task belongs to another agent")
-    if task["status"] == "dispatched":
-        return db.complete_task(
-            task_id,
-            ok=ok,
-            result=_bound_result(result, settings.agent_max_task_result_bytes),
-            error=(error or None),
-            # screenshots ride in the result; their cap is the dedicated one
-            max_result_bytes=(
-                settings.screenshot_max_bytes
-                if task["type"] == "screen_capture"
-                else settings.agent_max_task_result_bytes
-            ),
-        )
-    # Already finished/expired/cancelled: report the current state without
-    # storing a second result (duplicate-execution protection).
-    task["accepted"] = False
-    task["rejection_reason"] = f"task status is '{task['status']}'"
-    return task
+    """Persist a result and its receipt atomically, including delayed delivery.
+
+    Old clients without a result_id retain the original 409-on-repeat contract.
+    """
+    from netagent.security import canonical_json
+    import hashlib
+    with db.transaction():
+        task = db.get_task(task_id)
+        if task is None:
+            raise TaskError("task not found")
+        if task["agent_id"] != agent["id"]:
+            raise TaskError("task belongs to another agent")
+        digest = hashlib.sha256(canonical_json({"ok": ok, "result": result, "error": error})).hexdigest()
+        if result_id:
+            receipt = db.get_result_receipt(result_id) or db.get_task_result_receipt(task_id)
+            if receipt:
+                if (receipt["agent_id"], receipt["task_id"], receipt["result_id"], receipt["payload_sha256"]) != (agent["id"], task_id, result_id, digest):
+                    raise TaskError("result idempotency conflict")
+                return {**task, "accepted": True, "duplicate": True,
+                        "ack": _result_ack(result_id, task_id, agent["id"])}
+        limit = settings.screenshot_max_bytes if task["type"] == "screen_capture" else settings.agent_max_task_result_bytes
+        bounded = _bound_result(result, limit)
+        if task["status"] == "dispatched":
+            task = db.complete_task(task_id, ok=ok, result=bounded, error=error, max_result_bytes=limit)
+            disposition = "completed"
+        elif result_id and task["status"] in {"expired", "cancelled"}:
+            # Preserve late results without undoing expiry/cancellation policy.
+            task["accepted"] = True
+            disposition = "late"
+        else:
+            task["accepted"] = False
+            task["rejection_reason"] = f"task status is '{task['status']}'"
+            return task
+        if result_id:
+            db.record_result_receipt(result_id=result_id, task_id=task_id, agent_id=agent["id"],
+                                     digest=digest, disposition=disposition,
+                                     late_result={"ok": ok, "result": bounded, "error": error} if disposition == "late" else None)
+            task["ack"] = _result_ack(result_id, task_id, agent["id"])
+            task["delivery_disposition"] = disposition
+        return task
+
+
+def _result_ack(result_id: str, task_id: str, agent_id: str) -> dict[str, str]:
+    return {"status": "stored", "result_id": result_id, "task_id": task_id, "agent_id": agent_id}
 
 
 def _bound_params(params: dict[str, Any] | None) -> dict[str, Any]:

@@ -33,3 +33,13 @@ restart از offset ذخیره‌شده است. هنگام rotation، descriptor
 Schema جدید لازم نبود؛ cursor قبلی با فیلدهای inode/offset همچنان خوانده می‌شود و device/anchor به JSON بعدی افزوده می‌شوند. تنظیم WAL تغییر نکرد. commitهای helperهای دیتابیس داخل تراکنش مشترک به تعویق می‌افتند؛ رفتار مستقل آن‌ها حفظ شده است.
 
 آزمون هدفمند نخست: **۶۱ موفق**. سپس آزمون شکست commit و مرگ واقعی فرایند قبل commit اضافه شد. رگرسیون کامل `uv run pytest -q`: **۳۹۱ موفق، ۴ skipped** در ۷۵٫۵۴ ثانیه. آزمون‌های افزوده شامل append هنگام خاموشی، restart پس از شکست ذخیره، rotation در حالت روشن/خاموش، partial line، dedupe و rollback فرایند کشته‌شده‌اند.
+
+## فاز ۴ — تحویل نتیجهٔ Endpoint
+
+اصلاح و آزموده شد: در خود `endpoint_agent.py`، journal اجرای تسک و outbox SQLite اضافه شد. نتیجه پیش از ارسال روی دیسک می‌رود؛ فقط ACK منطبق با result_id/task_id/agent_id آن را حذف می‌کند. retry دارای backoff و سقف تأخیر است؛ نتیجهٔ تحویل‌نشده با گذشت زمان حذف نمی‌شود. نتیجهٔ اجرای قطع‌شده به‌صورت interrupted گزارش می‌شود و کار خودکار دوباره اجرا نمی‌شود. فایل 0600 در پوشهٔ 0700، خروجی محدود، صف محدود و tombstone اجرای قبلی حداقل تا انقضای تسک به‌علاوهٔ ۳۰ روز نگهداری می‌شود. تغییر فایل هویت نیز اتمیک شد.
+
+worker اجرای تسک پیش‌فرض یک و حداکثر چهار است؛ تحویل نتیجه و لغو Console worker محدود و مستقل دارند. heartbeat با اجرای طولانی متوقف نمی‌شود. `control_only=true` فقط پیام لغو Console را می‌گیرد. SIGTERM مسیر shutdown را طی می‌کند؛ کارهای بومی در حال اجرا تا مهلت محدود خود فرصت پایان دارند و توقف ناگهانی از journal بازیابی می‌شود.
+
+سرور با migration مستقل `001_agent_result_receipts` نتیجه و receipt را اتمیک ثبت می‌کند. درخواست تکراری با همان محتوا ACK مشابه می‌گیرد؛ تغییر محتوا با همان شناسه 409 است. درخواست عامل دیگر 403 است. نتیجهٔ دیررس در receipt حفظ می‌شود و وضعیت expired/cancelled تسک را عوض نمی‌کند؛ در جزئیات task قابل مشاهده است. API قدیمی بدون result_id قرارداد 409 قبلی را حفظ می‌کند. ACK جدید کوچک است و payload بزرگ screenshot را برنمی‌گرداند.
+
+آزمون نهایی: `uv run pytest tests/test_endpoint_result_spool.py tests/test_agent_api.py tests/test_console_api.py tests/test_admin_api.py tests/test_screenshot.py tests/test_openapi_docs.py tests/test_e2e_enrollment.py -q`؛ **۹۸ موفق** در ۶۸٫۶۶ ثانیه، شامل HTTP واقعی، restart spool، قطع تحویل، ACK نادرست، تعارض شناسه، rollback خطای DB، heartbeat هنگام کار طولانی و migration تکرارپذیر. آزمون‌ها از این فاز حتی هنگام import برنامه نیز به دیتابیس موقت هدایت می‌شوند تا migration آزمایشی روی دادهٔ کاربر اجرا نشود.

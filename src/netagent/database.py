@@ -486,6 +486,8 @@ class Database:
             self._conn.executescript(_SCHEMA)
             self._apply_additive_migrations()
             self._commit()
+            from netagent.migrations import apply_migrations
+            apply_migrations(self._conn)
 
     def _archive_legacy_tables(self) -> None:
         for name in _LEGACY_ORPHAN_TABLES:
@@ -1597,7 +1599,15 @@ class Database:
             row = self._conn.execute(
                 "SELECT * FROM agent_tasks WHERE id = ?", (task_id,)
             ).fetchone()
-        return self._task_row_to_dict(row) if row else None
+        if row is None:
+            return None
+        task = self._task_row_to_dict(row)
+        receipt = self.get_task_result_receipt(task_id)
+        if receipt:
+            task["result_delivery"] = {k: receipt[k] for k in ("result_id", "received_at", "disposition")}
+            if receipt.get("late_result_json"):
+                task["late_result"] = json.loads(receipt["late_result_json"])
+        return task
 
     @staticmethod
     def _task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -1660,6 +1670,26 @@ class Database:
                 "result was not stored"
             )
         return task
+
+    def get_result_receipt(self, result_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM agent_result_receipts WHERE result_id = ?", (result_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_task_result_receipt(self, task_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM agent_result_receipts WHERE task_id = ?", (task_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_result_receipt(self, *, result_id: str, task_id: str, agent_id: str,
+                              digest: str, disposition: str, late_result: dict | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO agent_result_receipts VALUES(?,?,?,?,?,?,?)",
+                (result_id, task_id, agent_id, digest, _now_iso(), disposition,
+                 json.dumps(late_result, ensure_ascii=False) if late_result is not None else None),
+            )
+            self._commit()
 
     def list_tasks(
         self,

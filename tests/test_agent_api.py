@@ -219,7 +219,7 @@ def test_foreign_agent_cannot_submit_result_for_others_task(full_client):
     message = claim_over_http(full_client, agent_token)
     r = full_client.post(f"/api/agent/v1/tasks/{message['task_id']}/result",
                          json={"ok": True}, headers=agent_headers(other_token))
-    assert r.status_code in (400, 404, 409)
+    assert r.status_code == 403
 
 
 def test_result_after_expiry_rejected(full_client, db):

@@ -121,7 +121,7 @@ def test_cross_agent_fetch_rejected(ss_client):
                     json={"ok": True, "result": {"ok": True,
                           "data_base64": base64.b64encode(TINY_PNG).decode()}},
                     headers={"Authorization": f"Bearer {t2}"})
-    assert r.status_code == 400 or r.json().get("accepted") is False
+    assert r.status_code == 403
     # fetching via the wrong agent path → 404
     img = client.get(f"/api/admin/v1/agents/{a2}/screenshot/{task_id}", headers=admin())
     assert img.status_code == 404

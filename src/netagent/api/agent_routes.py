@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Header, Path, Request
+from fastapi import APIRouter, HTTPException, Header, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from netagent.config import Settings
@@ -551,6 +551,7 @@ def agent_status(
 )
 def next_task(
     request: Request,
+    control_only: bool = Query(default=False, description="فقط پیام لغو نشست؛ برای حفظ کنترل هنگام اجرای کار طولانی."),
     authorization: str | None = Header(
         default=None,
         description=(
@@ -562,7 +563,7 @@ def next_task(
     db, settings = _ctx(request)
     agent = _agent_or_error(request, authorization)
     supported = list(agent.get("capabilities") or [])
-    message = task_service.dispatch_task(db, settings, agent, supported_types=supported)
+    message = task_service.dispatch_task(db, settings, agent, supported_types=supported, control_only=control_only)
     return {"task": message, "server_time_epoch": time.time()}
 
 
@@ -620,30 +621,29 @@ def task_result(
     db, settings = _ctx(request)
     agent = _agent_or_error(request, authorization)
     try:
-        updated = task_service.complete_task_from_agent(
-            db, settings,
-            agent=agent,
-            task_id=task_id,
-            ok=body.ok,
-            result=body.result,
-            error=body.error,
-        )
+        with db.transaction():
+            updated = task_service.complete_task_from_agent(
+                db, settings, agent=agent, task_id=task_id, ok=body.ok,
+                result=body.result, error=body.error, result_id=body.result_id,
+            )
+            if updated.get("accepted") is False:
+                return JSONResponse(status_code=409, content=updated)
+            if not updated.get("duplicate") and updated.get("delivery_disposition") != "late":
+                from netagent.services import console as console_service
+                if updated.get("type", "").startswith("console"):
+                    console_service.apply_agent_result(db, settings, task=updated, result=body.result)
+                elif updated.get("type") == "admin_python_script":
+                    db.record_audit(actor="agent", action="admin_script.completed", target=agent["id"],
+                                    detail={"task_id": task_id, "ok": body.ok, "duration_ms": body.duration_ms})
+            if body.result_id and not updated.get("duplicate"):
+                db.record_audit(actor="agent", action="task.result_received", target=agent["id"],
+                                detail={"task_id": task_id, "result_id": body.result_id,
+                                        "disposition": updated.get("delivery_disposition")})
+        if body.result_id:
+            return {key: updated[key] for key in ("id", "type", "status", "accepted", "duplicate", "ack", "delivery_disposition") if key in updated}
+        return updated
     except task_service.TaskError as exc:
         message = str(exc)
-        status = 404 if "not found" in message else 400
+        status = (404 if "not found" in message else 403 if "another agent" in message
+                  else 409 if "idempotency conflict" in message else 400)
         raise HTTPException(status_code=status, detail=message) from exc
-    if updated.get("accepted") is False:
-        return JSONResponse(status_code=409, content=updated)
-    # Console/admin bookkeeping (updates sessions/commands, records audit)
-    from netagent.services import console as console_service
-
-    if updated.get("type", "").startswith("console"):
-        console_service.apply_agent_result(db, settings, task=updated, result=body.result)
-    elif updated.get("type") == "admin_python_script" and updated.get("accepted"):
-        db.record_audit(
-            actor="agent", action="admin_script.completed",
-            target=agent["id"],
-            detail={"task_id": task_id, "ok": body.ok,
-                    "duration_ms": body.duration_ms},
-        )
-    return updated

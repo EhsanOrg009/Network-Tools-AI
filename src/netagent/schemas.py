@@ -343,6 +343,9 @@ class TaskResultRequest(BaseModel):
 
     model_config = {"extra": "ignore"}
 
+    result_id: str | None = Field(default=None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$",
+                                  description="شناسهٔ پایدار نتیجه برای ارسال مجدد بدون ثبت تکراری.")
+
     ok: bool = Field(description="موفق بودن اجرا؛ خطاهای ساختاریافته در result هم می‌آیند.")
     result: dict[str, Any] | None = Field(default=None, description="نتیجه‌ی ساختاریافته (محدود به سقف بایت).")
     error: str | None = Field(default=None, max_length=1000)

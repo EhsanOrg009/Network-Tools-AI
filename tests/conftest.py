@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import atexit
 from pathlib import Path
 
 import pytest
 
 from netagent.config import Settings
 from netagent.database import Database
+
+# Importing netagent.main creates its ASGI app. Keep that default app away
+# from the operator's database, even before per-test fixtures are created.
+_import_db_dir = tempfile.TemporaryDirectory(prefix="netagent-test-import-")
+os.environ["DATABASE_PATH"] = str(Path(_import_db_dir.name) / "import.sqlite3")
+atexit.register(_import_db_dir.cleanup)
 
 # --- Representative Suricata EVE records (fixed, self-contained) ------------
 

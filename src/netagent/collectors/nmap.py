@@ -106,7 +106,11 @@ def _needs_root(stderr: str) -> bool:
 
 def build_discovery_command(target: str) -> list[str]:
     """Fixed, allowlisted argument set for host discovery (-sn, no port scan)."""
-    return ["-sn", "-n", "-oG", "-", target]
+    return ["-sn", "-n", *_address_family_args(target), "-oG", "-", target]
+
+
+def _address_family_args(target: str) -> list[str]:
+    return ["-6"] if ipaddress.ip_network(target, strict=False).version == 6 else []
 
 
 def parse_grepable(output: str) -> list[dict[str, Any]]:
@@ -159,7 +163,7 @@ def host_discovery(
 
 def build_service_command(target: str, ports: list[int], service_detection: bool) -> list[str]:
     """Unprivileged TCP connect scan (-sT) with optional version detection."""
-    args = ["-sT", "-Pn", "--reason", "-n", "-oX", "-",
+    args = ["-sT", "-Pn", "--reason", "-n", *_address_family_args(target), "-oX", "-",
             "-p", ",".join(str(p) for p in ports)]
     if service_detection:
         args += ["-sV", "--version-light"]
@@ -288,7 +292,7 @@ def port_service_scan(
 def build_os_command(target: str, ports: list[int]) -> list[str]:
     """OS detection arguments (requires root / cap_net_raw)."""
     return [
-        "-O", "--osscan-guess", "--reason", "-Pn", "-n", "-oX", "-",
+        "-O", "--osscan-guess", "--reason", "-Pn", "-n", *_address_family_args(target), "-oX", "-",
         "-p", ",".join(str(p) for p in ports),
         target,
     ]

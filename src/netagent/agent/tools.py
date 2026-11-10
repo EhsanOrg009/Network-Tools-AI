@@ -225,6 +225,8 @@ def _run_arp_scan(db: Database, settings: Settings, args: dict[str, Any], scope:
     import subprocess
 
     v = _validate_target_arg(args, scope, discovery=True)
+    if ipaddress.ip_network(v["target"], strict=False).version != 4:
+        raise ValueError("arp-scan supports IPv4 only; use nmap_discovery for IPv6")
     started = time.monotonic()
     try:
         proc = subprocess.run(  # noqa: S603 - fixed args, validated CIDR, no shell
@@ -358,7 +360,7 @@ def _run_reverse_dns(db: Database, settings: Settings, args: dict[str, Any], sco
     ip = args.get("ip") or args.get("host")
     if not ip:
         raise ValueError("ip is required")
-    return system_info.reverse_dns(scope.authorize(str(ip), host_only=True))
+    return system_info.reverse_dns(str(ip), settings=settings, scope=scope)
 
 
 def _run_fingerprint(db: Database, settings: Settings, args: dict[str, Any], scope: ToolScope) -> dict[str, Any]:

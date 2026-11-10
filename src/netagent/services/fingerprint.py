@@ -297,7 +297,7 @@ def fingerprint_host(
     ip = ToolScope(settings, []).authorize(ip, host_only=True)
 
     arp_result = system_info.arp_info(ip)
-    rdns_result = system_info.reverse_dns(ip)
+    rdns_result = system_info.reverse_dns(ip, settings=settings)
     os_result = None
     service_result = None
     availability = None

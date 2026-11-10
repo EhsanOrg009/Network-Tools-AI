@@ -14,6 +14,9 @@ import subprocess
 import time
 from typing import Any
 
+from netagent.config import Settings
+from netagent.scope import ToolScope
+
 MAX_TEXT_BYTES = 32 * 1024
 
 # Small offline OUI prefix map (manufacturer identification, best effort).
@@ -137,12 +140,14 @@ def route_info(timeout: int = 10) -> dict[str, Any]:
     }
 
 
-def reverse_dns(target_ip: str, timeout: int = 20) -> dict[str, Any]:
+def reverse_dns(target_ip: str, timeout: int = 20, *, settings: Settings,
+                scope: ToolScope | None = None) -> dict[str, Any]:
     """Reverse-DNS lookup via ``nmap -sL`` (bounded, unprivileged).
 
     A reverse-DNS name is a *guess-grade* hostname: the mapping is configured
     by whoever controls the PTR record, not a verified property of the device.
     """
+    target_ip = (scope or ToolScope(settings, [])).authorize(target_ip, host_only=True)
     try:
         ipaddress.ip_address(target_ip)
     except ValueError as exc:
@@ -151,7 +156,8 @@ def reverse_dns(target_ip: str, timeout: int = 20) -> dict[str, Any]:
     started = time.monotonic()
     # NOTE: no "-n" here — -n disables DNS resolution and would make the PTR
     # lookup useless. --system-dns uses the system resolver directly.
-    out = _run(["nmap", "-sL", "--system-dns", target_ip], timeout)
+    family = ["-6"] if ipaddress.ip_address(target_ip).version == 6 else []
+    out = _run(["nmap", "-sL", *family, "--system-dns", target_ip], timeout)
     if out is None:
         return {"tool": "reverse_dns", "ip": target_ip, "ok": False,
                 "error": "lookup unavailable or timed out"}

@@ -67,3 +67,9 @@ worker اجرای تسک پیش‌فرض یک و حداکثر چهار است؛ 
 اصلاح و آزموده شد: `AUTO_DISCOVERY_TTL_SECONDS=900`، اعتبار مشاهده و آخرین Inventory، heartbeat تازه، enrollment فعال و رابط فعلی/up همگی شرط مجوز مشتق‌شده هستند. لغو عامل، تغییر subnet و حذف رابط فوراً اثر می‌گذارند؛ دادهٔ تاریخی و CIDRهای مدیر حذف یا تغییر نمی‌کنند. ذخیرهٔ Inventory و observation در یک تراکنش انجام می‌شود. projection دیتابیس اکنون زمان عددی مشاهده را نیز برمی‌گرداند.
 
 آزمون: `uv run pytest tests/test_discovery_policy.py tests/test_discovery_freshness.py tests/test_agent_api.py tests/test_scope_enforcement.py -q`؛ **۷۱ موفق**. شکست اولیهٔ ۸ تست به حذف `last_epoch` از خروجی query مربوط بود؛ پس از رفع علت، تمام آزمون‌ها موفق شدند.
+
+### Ping و IPv6
+
+اصلاح و آزموده شد: شمارش پاسخ Ping از رکورد پاسخ (نه جمع TTL و time)، گزینه‌های Windows/Linux، Nmap discovery/services/OS و reverse DNS با `-6`، و رد IPv6 در arp-scan پیش از اجرا. reverse DNS در collector نیز کنترل Scope دارد. همهٔ عملیات فعال در این آزمون‌ها mock هستند، به‌جز آزمون اتصال محدود و مجاز loopback قبلی.
+
+`uv run pytest tests/test_network_formats.py tests/test_tool_validation.py tests/test_nmap_tools.py tests/test_scope_enforcement.py tests/test_fingerprint.py -q`: **۱۰۸ موفق**.

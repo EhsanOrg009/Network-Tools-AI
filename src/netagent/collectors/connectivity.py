@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import platform
 import ipaddress
 import socket
 import subprocess
@@ -46,12 +47,12 @@ def ping(
     count = count or settings.ping_count
     count = max(1, min(int(count), settings.ping_count))
     timeout = settings.ping_timeout_seconds
-    cmd = [
-        "/usr/bin/ping" if _exists("/usr/bin/ping") else "ping",
-        "-c", str(count),
-        "-W", str(timeout),
-        host,
-    ]
+    ipv6 = ipaddress.ip_address(host).version == 6
+    if platform.system() == "Windows":
+        cmd = ["ping", "-6" if ipv6 else "-4", "-n", str(count), "-w", str(timeout * 1000), host]
+    else:
+        cmd = ["/usr/bin/ping" if _exists("/usr/bin/ping") else "ping",
+               *(["-6"] if ipv6 else []), "-c", str(count), "-W", str(timeout), host]
     started = time.monotonic()
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argument list, no shell
@@ -69,10 +70,13 @@ def ping(
                 "error": f"ping unavailable: {exc}"}
 
     stdout = proc.stdout.decode("utf-8", "replace")
-    responses = stdout.count("ttl=") + stdout.count("time=")
-    # "time=12.3 ms" lines carry latency
-    latencies = [float(m) for m in re.findall(r"time[=<]\s*([\d.]+)\s*ms", stdout)]
-    loss_match = re.search(r"([\d.]+)% packet loss", stdout)
+    # One reply record is one response, even if it contains both TTL and time.
+    replies = [line for line in stdout.splitlines()
+               if re.search(r"(?:bytes from|reply from)\s", line, re.I)
+               and re.search(r"time[=<]\s*[\d.]+\s*ms", line, re.I)]
+    responses = len(replies)
+    latencies = [float(m) for line in replies for m in re.findall(r"time[=<]\s*([\d.]+)\s*ms", line, re.I)]
+    loss_match = re.search(r"([\d.]+)%\s*(?:packet loss|loss)", stdout, re.I)
     loss = float(loss_match.group(1)) if loss_match else None
     ok = proc.returncode == 0 and responses > 0
     error = None if ok else _first_error_line(stdout, proc.stderr.decode("utf-8", "replace"))

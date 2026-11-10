@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -13,10 +13,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from netagent import __version__
 from netagent.agent.llm_client import LLMClient
 from netagent.api.agent_routes import router as agent_router
-from netagent.api.admin_routes import router as admin_router
+from netagent.api.admin_routes import admin_access, router as admin_router
 from netagent.api.dashboard_routes import router as dashboard_router
 from netagent.api.docs_ui import rtl_swagger_ui_html
 from netagent.api.routes import router
+from netagent.api.request_limits import EnrollmentBodyLimit
 from netagent.config import Settings, load_settings
 from netagent.database import Database
 from netagent.services.monitoring import Monitor
@@ -180,15 +181,26 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
     def docs_redirect() -> RedirectResponse:
         return RedirectResponse(url="/api/docs")
 
+    app.add_middleware(EnrollmentBodyLimit)
     app.state.db = db
     app.state.settings = settings
     app.state.monitor = monitor
     app.state.llm = llm
     app.state.jobs = JobManager()
-    app.include_router(router)
+    app.include_router(router, dependencies=[Depends(admin_access)])
     app.include_router(agent_router)
-    app.include_router(admin_router)
-    app.include_router(dashboard_router)
+    app.include_router(admin_router, dependencies=[Depends(admin_access)])
+    app.include_router(dashboard_router, dependencies=[Depends(admin_access)])
+
+    @app.get(
+        "/healthz", tags=["سلامت سیستم"], summary="بررسی عمومی زنده بودن برنامه",
+        description="پاسخ عمومی و حداقلی؛ جزئیات اجزا فقط در مسیر احرازهویت‌شدهٔ /health است.",
+        responses={200: {"description": "برنامه پاسخ می‌دهد.", "content": {
+            "application/json": {"examples": {"default": {"value": {"status": "ok"}}}}
+        }}},
+    )
+    def liveness() -> dict[str, str]:
+        return {"status": "ok"}
 
     # -- dashboard SPA (built frontend; optional in dev/test) ------------------
     # /dashboard serves dashboard/dist (Vite build, base="/dashboard/").

@@ -20,6 +20,7 @@ from netagent.schemas import InvestigationRequest, ScanRequest
 
 # The real, complete endpoint contract (path, method) — any drift breaks these tests.
 EXPECTED_ENDPOINTS = {
+    ("GET", "/healthz"),
     ("GET", "/health"),
     # — existing application API —
     ("GET", "/api/hosts"),

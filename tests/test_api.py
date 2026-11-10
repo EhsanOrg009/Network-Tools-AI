@@ -9,16 +9,20 @@ from fastapi.testclient import TestClient
 from netagent.agent.llm_client import LLMUnavailable
 from netagent.collectors.suricata import parse_eve_line, store_event
 from netagent.main import create_app
-from tests.conftest import ALERT_LINE, DNS_LINE, TLS_LINE
+from tests.conftest import ADMIN_TOKEN, ALERT_LINE, DNS_LINE, TLS_LINE, admin_headers
 
 
 @pytest.fixture()
 def client(settings, db, monkeypatch):
     settings.enable_monitor = False
+    settings.admin_api_token = ADMIN_TOKEN
+    # Investigations in API tests must never start real network diagnostics.
+    monkeypatch.setattr("netagent.collectors.connectivity.ping", lambda *a, **k: {"ok": False, "responses": 0})
+    monkeypatch.setattr("netagent.collectors.nmap._run_nmap", lambda *a, **k: ("", "fixture: no live scan", 1, False))
     app = create_app(settings, start_monitor=False)
     # replace app-owned db with the fixture-owned one (auto-closed by fixture)
     app.state.db = db
-    with TestClient(app) as c:
+    with TestClient(app, headers=admin_headers()) as c:
         yield c
 
 

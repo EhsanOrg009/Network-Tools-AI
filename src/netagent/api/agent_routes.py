@@ -136,6 +136,12 @@ def _agent_or_error(request: Request, authorization: str | None) -> dict[str, An
 )
 def enroll(request: Request, body: EnrollRequest) -> dict[str, Any]:
     db, settings = _ctx(request)
+    limiter = getattr(request.app.state, "enroll_limiter", None)
+    if limiter is None:
+        limiter = _RateLimiter(max_events=settings.registration_rate_limit_per_hour, window_seconds=3600)
+        request.app.state.enroll_limiter = limiter
+    if not limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="تعداد درخواست‌های ثبت‌نام بیش از حد مجاز است.")
     try:
         agent, token = enroll_agent(db, settings, body, origin="agent-api")
     except EnrollmentError as exc:

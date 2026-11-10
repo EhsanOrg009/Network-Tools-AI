@@ -78,7 +78,7 @@ def stack(tmp_path_factory):
     )
     for _ in range(50):
         try:
-            if _req("GET", f"{base}/health")[0] == 200:
+            if _req("GET", f"{base}/healthz")[0] == 200:
                 break
         except Exception:
             time.sleep(0.4)

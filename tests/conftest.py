@@ -123,10 +123,11 @@ def client(settings, db, monkeypatch):
     from netagent.main import create_app
 
     settings.enable_monitor = False
+    settings.admin_api_token = ADMIN_TOKEN
     app = create_app(settings, start_monitor=False)
     # replace app-owned db with the fixture-owned one (auto-closed by fixture)
     app.state.db = db
-    with TestClient(app) as c:
+    with TestClient(app, headers=admin_headers()) as c:
         yield c
 
 

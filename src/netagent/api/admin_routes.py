@@ -14,7 +14,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import hashlib
 
@@ -90,6 +91,8 @@ def require_admin(
     presented = (authorization or "").strip()
     if presented.lower().startswith("bearer "):
         presented = presented[7:].strip()
+    else:
+        raise AdminUnauthorized()
     if not verify_admin_token(
         presented, settings.admin_api_token, settings.admin_api_token_sha256
     ):
@@ -111,7 +114,20 @@ def _guard(request: Request, authorization: str | None, x_admin_actor: str | Non
         raise HTTPException(
             status_code=401,
             detail="توکن مدیر نامعتبر است.",
+            headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+
+_admin_bearer = HTTPBearer(auto_error=False, scheme_name="AdministratorBearer")
+
+
+def admin_access(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_admin_bearer),
+) -> str:
+    """Router-level gate shared by legacy, dashboard and administrative APIs."""
+    authorization = f"Bearer {credentials.credentials}" if credentials else None
+    return _guard(request, authorization, request.headers.get("x-admin-actor"))
 
 
 _ERR_503 = {"value": {"detail": "API مدیر غیرفعال است؛ ADMIN_API_TOKEN تنظیم نشده است."}}

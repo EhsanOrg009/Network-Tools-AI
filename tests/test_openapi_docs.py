@@ -40,6 +40,7 @@ EXPECTED_ENDPOINTS = {
     # — endpoint agent API (agent bearer credentials) —
     ("POST", "/api/agent/v1/enroll"),
     ("POST", "/api/agent/v1/heartbeat"),
+    ("GET", "/api/agent/v1/signing-key"),
     ("POST", "/api/agent/v1/inventory"),
     ("POST", "/api/agent/v1/status"),
     ("GET", "/api/agent/v1/tasks/next"),

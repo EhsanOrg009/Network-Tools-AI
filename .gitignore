@@ -12,6 +12,7 @@ data/
 # Environment / secrets
 .env
 .env.local
+task-signing-v2.key
 
 # Test / tooling caches
 .pytest_cache/

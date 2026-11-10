@@ -224,7 +224,26 @@ def heartbeat(
         "heartbeat_interval_seconds": settings.agent_heartbeat_interval_seconds,
         "inventory_due": inventory_due,
         "max_task_result_bytes": settings.agent_max_task_result_bytes,
+        "task_signing_protocol": 2,
+        "control_only_polling": True,
     }
+
+
+@router.get(
+    "/signing-key", tags=["Endpoint Agent"], summary="دریافت کلید امضای مستقل همین عامل",
+    description="فقط عامل فعال با توکن خودش کلید نسخهٔ ۲ خود را می‌گیرد؛ کلید مادر هرگز ارسال نمی‌شود. ارتباط باید TLS باشد.",
+    responses=_responses("کلید مستقل همین عامل؛ در log یا prompt قرار نمی‌گیرد.",
+                         {"protocol_version": 2, "algorithm": "HMAC-SHA256", "key_id": "example", "key": "example-only"}, revoked=True),
+)
+def signing_key(request: Request, authorization: str | None = Header(default=None, description="Bearer توکن اختصاصی عامل.")):
+    db, settings = _ctx(request)
+    agent = _agent_or_error(request, authorization)
+    if not settings.task_signing_key:
+        raise HTTPException(status_code=403, detail="امضای تسک غیرفعال است.")
+    from netagent.services.signing import agent_key, key_id
+    return JSONResponse({"protocol_version": 2, "algorithm": "HMAC-SHA256", "agent_id": agent["id"],
+                         "key_id": key_id(settings), "key": agent_key(settings, agent["id"])},
+                        headers={"Cache-Control": "no-store"})
 
 
 def _iso_to_epoch(value: str | None) -> float:

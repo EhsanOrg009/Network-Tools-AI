@@ -24,7 +24,7 @@
   python endpoint_agent.py status
 
 پیکربندی با آرگومان یا متغیر محیطی: NETAGENT_SERVER_URL,
-NETAGENT_AGENT_TOKEN, NETAGENT_AGENT_ID, NETAGENT_TASK_SIGNING_KEY.
+NETAGENT_AGENT_TOKEN, NETAGENT_AGENT_ID. کلید نسخهٔ ۲ فقط از کانال احرازهویت‌شده دریافت می‌شود.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.0"
 STATE_DEFAULT = Path(os.path.expanduser("~/.netagent_endpoint_state.json"))
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_EXECUTED_TASK_MEMORY = 200
@@ -321,46 +321,52 @@ def derive_signing_key(master: str, agent_id: str) -> str:
 
 
 def verify_envelope(message: dict, master_key: str, agent_id: str,
-                    seen_nonces: list[str] | None = None) -> tuple[bool, str]:
-    """Verify a signed admin task envelope.
-
-    When ``seen_nonces`` is given it is updated in place (bounded by the
-    caller): a nonce that was already accepted yields ``(False, "nonce
-    replay")`` — an attacker replaying a captured envelope (even inside its
-    validity window) is rejected independently of the task-id dedupe."""
+                    seen_nonces: list[str] | None = None, *, allow_legacy=False) -> tuple[bool, str]:
+    """Version 2 takes only this agent's key; upgraded agents reject downgrade."""
+    import math
     env = message.get("envelope")
-    if not isinstance(env, dict):
-        return False, "missing envelope"
+    if not isinstance(env, dict) or not master_key:
+        return False, "missing envelope or credential"
     required = ("kind", "task_id", "agent_id", "type", "params_sha256", "expires_epoch", "nonce")
+    if env.get("kind") == "netagent.admin-task.v2":
+        required += ("protocol_version", "key_id", "timeout_seconds")
+        key = master_key
+        if env.get("protocol_version") != 2 or env.get("timeout_seconds") != message.get("timeout_seconds"):
+            return False, "protocol or timeout mismatch"
+    elif allow_legacy and env.get("kind") == ENVELOPE_KIND:
+        key = derive_signing_key(master_key, agent_id)
+    else:
+        return False, "unsupported or legacy envelope"
     if any(k not in env for k in required):
         return False, "incomplete envelope"
     payload = {k: env[k] for k in required}
-    signature = env.get("signature", "")
-    key = derive_signing_key(master_key, agent_id)
-    expected = hmac.new(key.encode("utf-8"), _canonical(payload), hashlib.sha256).hexdigest()
+    signature = env.get("signature")
+    if not isinstance(signature, str):
+        return False, "invalid signature type"
+    expected = hmac.new(key.encode(), _canonical(payload), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         return False, "bad signature"
-    if payload["kind"] != ENVELOPE_KIND:
-        return False, "unknown envelope kind"
     if payload["agent_id"] != agent_id:
         return False, "envelope addressed to another agent"
-    if payload["type"] != message.get("type"):
-        return False, "envelope/task type mismatch"
-    params_digest = hashlib.sha256(
-        json.dumps(message.get("params") or {}, sort_keys=True, separators=(",", ":"),
-                   ensure_ascii=False, default=str).encode("utf-8")
-    ).hexdigest()
-    if not hmac.compare_digest(params_digest, payload["params_sha256"]):
+    if payload["task_id"] != message.get("task_id") or payload["type"] != message.get("type"):
+        return False, "envelope/task identity mismatch"
+    params_digest = hashlib.sha256(_canonical(message.get("params") or {})).hexdigest()
+    if params_digest != payload["params_sha256"]:
         return False, "params do not match the signed digest"
-    if time.time() > float(payload["expires_epoch"]):
-        return False, "envelope expired"
-    nonce = str(payload["nonce"])
+    try:
+        expires = float(payload["expires_epoch"])
+        if not math.isfinite(expires) or time.time() > expires:
+            return False, "envelope expired"
+    except (ValueError, TypeError):
+        return False, "invalid expiry"
+    nonce = payload["nonce"]
+    if not isinstance(nonce, str) or not nonce:
+        return False, "invalid nonce"
     if seen_nonces is not None:
         if nonce in seen_nonces:
             return False, "nonce replay (already accepted)"
         seen_nonces.append(nonce)
-        if len(seen_nonces) > MAX_SEEN_NONCES:
-            del seen_nonces[: len(seen_nonces) - MAX_SEEN_NONCES]
+        del seen_nonces[:-MAX_SEEN_NONCES]
     return True, "ok"
 
 
@@ -1255,7 +1261,7 @@ class EndpointAgent:
             self.state.data["agent_token"] = token_env
         if args.server_url:
             self.state.data["server_url"] = self.server_url
-        self.signing_key = os.environ.get("NETAGENT_TASK_SIGNING_KEY", "")
+        self.signing_key = self.state.data.get("task_signing_v2_key", "")
         # enroll/status subparsers don't carry the run-only flags; default them.
         self.heartbeat_interval = max(5, int(getattr(args, "heartbeat_interval", 30) or 30))
         self.inventory_interval = max(30, int(getattr(args, "inventory_interval", 300) or 300))
@@ -1384,7 +1390,7 @@ class EndpointAgent:
     # -- capabilities ----------------------------------------------------------
 
     def capabilities(self) -> list[str]:
-        caps = list(DIAGNOSTIC_CAPABILITIES)
+        caps = [*DIAGNOSTIC_CAPABILITIES, "task_signing_v2"]
         if self.allow_admin_exec:
             caps.append("admin_exec")
         if self.allow_admin_console:
@@ -1555,6 +1561,17 @@ class EndpointAgent:
         }
         response = self.api().request("POST", "/api/agent/v1/heartbeat", payload=body)
         self.last_heartbeat = time.time()
+        if (self.allow_admin_exec or self.allow_admin_console or self.allow_screenshot) and response.get("task_signing_protocol") == 2:
+            credential = self.api().request("GET", "/api/agent/v1/signing-key")
+            if credential.get("agent_id") != self.state.agent_id or credential.get("protocol_version") != 2:
+                raise ApiError(0, "invalid signing credential identity")
+            key = credential.get("key", "")
+            if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+                raise ApiError(0, "invalid signing credential")
+            self.signing_key = key
+            if self.state.data.get("task_signing_v2_key") != key:
+                self.state.data.update(task_signing_v2_key=key, task_signing_key_id=credential["key_id"])
+                self.state.save()
         if response.get("agent_status") == "revoked":
             raise SystemExit("اعتبارنامه‌ی این عامل در سرور باطل شده است (403).")
         return response
@@ -1770,6 +1787,8 @@ class EndpointAgent:
                     self.poll_and_execute_task()
                 attempt = 0
             except ApiError as exc:
+                if self.state.agent_token and exc.status in (401, 403):
+                    return 2
                 if once:
                     return 2
                 attempt += 1
@@ -1844,7 +1863,7 @@ def build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--state-file", default=None)
     diag.add_argument("--server-url", default=None)
     diag.add_argument("--ping-server", action="store_true",
-                      help="همچنین یک درخواست /health به مرکز بفرست")
+                      help="همچنین یک درخواست /healthz به مرکز بفرست")
 
     return parser
 
@@ -1892,7 +1911,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 client = ApiClient(
                     server_url, None, ca_bundle=os.environ.get("NETAGENT_CA_BUNDLE"))
-                client.request("GET", "/health", auth=False)
+                client.request("GET", "/healthz", auth=False)
                 report["server"]["reachable"] = True
             except ApiError as exc:
                 report["server"] = {"url": server_url, "reachable": False,

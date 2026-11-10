@@ -78,6 +78,8 @@ def build_signed_envelope(
     task_type: str,
     params: dict[str, Any],
     expires_epoch: float,
+    protocol_version: int = 1,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Build the envelope handed to the agent for admin execution tasks.
 
@@ -99,6 +101,13 @@ def build_signed_envelope(
         "expires_epoch": expires_epoch,
         "nonce": secrets.token_hex(8),
     }
+    if protocol_version == 2:
+        from netagent.services.signing import agent_key, key_id
+        key = agent_key(settings, agent_id)
+        payload.update(kind="netagent.admin-task.v2", protocol_version=2,
+                       key_id=key_id(settings), timeout_seconds=timeout_seconds)
+    elif protocol_version != 1:
+        raise TaskError("unsupported signing protocol")
     payload["signature"] = sign_task(payload, key)
     return payload
 
@@ -197,6 +206,8 @@ def create_admin_script_task(
         task_type="admin_python_script",
         params=params,
         expires_epoch=task["expiry_epoch"] or (time.time() + ttl),
+        protocol_version=2 if "task_signing_v2" in (agent.get("capabilities") or []) else 1,
+        timeout_seconds=timeout,
     )
     return task
 
@@ -223,12 +234,16 @@ def dispatch_task(
     """
     db.expire_due_tasks()
     caps = set(supported_types or agent.get("capabilities") or DEFAULT_CAPABILITIES)
+    from netagent.services.signing import legacy_allowed
+    protocol_v2 = "task_signing_v2" in caps
     allowed: set[str] = set()
     for cap in caps:
         types = CAPABILITY_TO_TASK_TYPES.get(cap, ())
         if not types:
             continue
         if types[0] in ADMIN_TASK_TYPES:
+            if not protocol_v2 and not legacy_allowed(db, settings):
+                continue
             # Central policy gate: admin task families are claimable only when
             # both the server feature flag and the signing key are present.
             if types[0] == "admin_python_script" and not settings.allow_admin_python_exec:
@@ -267,6 +282,8 @@ def dispatch_task(
         task_type=task["type"],
         params=params,
         expires_epoch=task["expiry_epoch"] or time.time() + 60,
+        protocol_version=2 if protocol_v2 else 1,
+        timeout_seconds=task["timeout_seconds"],
     )
     return message
 

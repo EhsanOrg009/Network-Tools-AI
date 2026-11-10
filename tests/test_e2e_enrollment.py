@@ -63,7 +63,6 @@ def stack(tmp_path_factory):
         "DATABASE_PATH": str(db_path),
         "ADMIN_API_TOKEN": ADMIN_TOKEN,
         "TASK_SIGNING_KEY": SIGNING_KEY,
-        "NETAGENT_TASK_SIGNING_KEY": SIGNING_KEY,
         "ALLOW_AUTO_REGISTRATION": "true",
         "ALLOW_ADMIN_PYTHON_CONSOLE": "true",
         "ENABLE_MONITOR": "false",

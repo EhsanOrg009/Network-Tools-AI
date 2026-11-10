@@ -196,6 +196,9 @@ class Settings(BaseSettings):
     # HMAC-SHA256 key used to sign admin script/console task envelopes. The
     # signing key is never exposed to the LLM or stored in the database.
     task_signing_key: str = ""
+    task_signing_v2_key_path: Path | None = None
+    task_signing_allow_legacy: bool = True
+    task_signing_legacy_days: int = Field(default=30, ge=0, le=90)
     # Master switches for the two administrator-only remote-execution features.
     allow_admin_python_exec: bool = False
     allow_admin_python_console: bool = False

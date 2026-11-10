@@ -124,6 +124,8 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
         start_monitor = settings.enable_monitor
 
     db = Database(settings.database_path)
+    from netagent.services.signing import initialize as initialize_signing
+    initialize_signing(db, settings)
     monitor = Monitor(db, settings)
     llm = LLMClient(settings) if settings.llm_enabled else None
     from netagent.services.ai_analysis import AlertAnalysisWorker

@@ -1528,7 +1528,7 @@ class Database:
             rows = self._conn.execute(
                 f"""
                 SELECT id, agent_id, interface, cidr, classification, connected,
-                       source, first_seen, last_seen
+                       source, first_seen, last_seen, last_epoch
                 FROM network_observations {cond}
                 ORDER BY last_epoch DESC LIMIT ? OFFSET ?
                 """,

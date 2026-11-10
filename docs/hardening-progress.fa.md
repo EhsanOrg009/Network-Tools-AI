@@ -61,3 +61,9 @@ worker اجرای تسک پیش‌فرض یک و حداکثر چهار است؛ 
 خطر واقعی دیگری در migration قدیمی رفع شد: جدول سالم `ai_memories` دیگر هنگام restart به نام legacy تغییر نمی‌کند. آزمون، باقی‌ماندن حافظهٔ تأییدشده در جدول فعال را پس از بازکردن دوبارهٔ دیتابیس بررسی می‌کند.
 
 فرمان: `uv run pytest tests/test_jobs.py tests/test_api.py tests/test_database.py tests/test_ai_memory.py tests/test_openapi_docs.py tests/test_access_matrix.py tests/test_agent_loop.py tests/test_ai_activity.py -q`؛ **۱۱۸ موفق** در ۱۰٫۱۶ ثانیه. هشت آزمون جدید ظرفیت هم‌زمان، صف پر، لغو صف/اجرا، timeout همکار و غیرهمکار، restart، shutdown محدود و حفظ دانش را پوشش می‌دهند.
+
+## فاز ۷ — تازگی Discovery
+
+اصلاح و آزموده شد: `AUTO_DISCOVERY_TTL_SECONDS=900`، اعتبار مشاهده و آخرین Inventory، heartbeat تازه، enrollment فعال و رابط فعلی/up همگی شرط مجوز مشتق‌شده هستند. لغو عامل، تغییر subnet و حذف رابط فوراً اثر می‌گذارند؛ دادهٔ تاریخی و CIDRهای مدیر حذف یا تغییر نمی‌کنند. ذخیرهٔ Inventory و observation در یک تراکنش انجام می‌شود. projection دیتابیس اکنون زمان عددی مشاهده را نیز برمی‌گرداند.
+
+آزمون: `uv run pytest tests/test_discovery_policy.py tests/test_discovery_freshness.py tests/test_agent_api.py tests/test_scope_enforcement.py -q`؛ **۷۱ موفق**. شکست اولیهٔ ۸ تست به حذف `last_epoch` از خروجی query مربوط بود؛ پس از رفع علت، تمام آزمون‌ها موفق شدند.

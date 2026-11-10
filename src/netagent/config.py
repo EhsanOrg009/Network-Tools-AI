@@ -241,6 +241,7 @@ class Settings(BaseSettings):
     auto_discovery_max_addresses: int = Field(default=1024, ge=2, le=65536)
     # A subnet needs at least this many agreeing agent observations.
     auto_discovery_min_reporters: int = Field(default=1, ge=1, le=10)
+    auto_discovery_ttl_seconds: int = Field(default=900, ge=30, le=86400)
 
     # ------------------------------------------------------------------
     # Derived helpers

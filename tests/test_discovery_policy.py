@@ -28,6 +28,13 @@ def _seed_agent(db: Database, agent_id: str = "agt_disc1") -> None:
 
 def _observe(db: Database, agent_id: str, cidr: str, iface: str = "eth0",
              classification: str = "physical", connected: bool = True) -> None:
+    inventory = (db.get_latest_inventory(agent_id) or {}).get("inventory") or {"interfaces": []}
+    current = next((i for i in inventory["interfaces"] if i["name"] == iface), None)
+    if current is None:
+        current = {"name": iface, "status": "up" if connected else "down", "classification": classification, "connected_networks": []}
+        inventory["interfaces"].append(current)
+    current["connected_networks"].append(cidr)
+    db.store_inventory(agent_id, inventory)
     db.record_network_observations(agent_id, [{
         "interface": iface, "cidr": cidr,
         "classification": classification, "connected": connected,

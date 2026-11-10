@@ -17,10 +17,11 @@ MONITOR_CIDRS scope. Every decision records its origin and justification.
 from __future__ import annotations
 
 import ipaddress
+import time
 from typing import Any
 
 from netagent.config import Settings
-from netagent.database import Database
+from netagent.database import Database, parse_iso_epoch
 
 
 def classify_cidr(cidr: str) -> str:
@@ -62,6 +63,10 @@ def auto_discovery_eligible_networks(
     discovery, each with the justification for the decision (audit trail)."""
     if not settings.auto_discovery_enabled:
         return []
+    now = time.time() if now_epoch is None else now_epoch
+    ttl = settings.auto_discovery_ttl_seconds
+    agent_cache = {}
+    inventory_cache = {}
     rows = db.list_network_observations(limit=1000)
     by_cidr: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -88,6 +93,38 @@ def auto_discovery_eligible_networks(
         excluded_ifaces = {i.lower() for i in settings.discovery_excluded_interface_list}
         reporters: dict[str, set[str]] = {}
         for obs in observations:
+            agent_id = obs["agent_id"]
+            if agent_id not in agent_cache:
+                agent_cache[agent_id] = db.get_agent(agent_id)
+                inventory_cache[agent_id] = db.get_latest_inventory(agent_id)
+            agent = agent_cache[agent_id]
+            latest = inventory_cache[agent_id]
+            if not agent or agent.get("status") != "enrolled" or agent.get("revoked_at") or not latest:
+                continue
+            heartbeat = agent.get("last_heartbeat_epoch") or 0
+            observed = obs.get("last_epoch") or 0
+            received = parse_iso_epoch(latest.get("collected_at")) or 0
+            inventory = latest.get("inventory") or {}
+            collected = inventory.get("collected_at_epoch")
+            if collected is None:
+                collected = received
+            if not (0 <= now - heartbeat <= settings.agent_heartbeat_timeout_seconds and
+                    0 <= now - observed <= ttl and 0 <= now - received <= ttl and
+                    -300 <= now - collected <= ttl):
+                continue
+            current_iface = next((i for i in inventory.get("interfaces", []) if i.get("name") == obs["interface"]), None)
+            if not current_iface or (current_iface.get("status") or "up") != "up":
+                continue
+            if current_iface.get("classification") in {"virtual", "vpn", "loopback", "link_local"}:
+                continue
+            current_networks = set()
+            for raw in current_iface.get("connected_networks") or []:
+                try:
+                    current_networks.add(str(ipaddress.ip_network(raw, strict=False)))
+                except ValueError:
+                    continue
+            if cidr not in current_networks:
+                continue
             if not obs.get("connected"):
                 continue
             if (obs.get("interface") or "").lower() in excluded_ifaces:
@@ -138,6 +175,7 @@ def effective_discovery_scope(
             for e in auto
         ],
         "auto_discovery_enabled": settings.auto_discovery_enabled,
+        "observation_ttl_seconds": settings.auto_discovery_ttl_seconds,
         "note": (
             "اسکن فقط روی configured_cidrs ∪ auto_discovered مجاز است. "
             "این فهرست جای MONITOR_CIDRS را نمی‌گیرد؛ فقط آن را گسترش می‌دهد."

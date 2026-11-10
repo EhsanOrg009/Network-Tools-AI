@@ -144,32 +144,33 @@ def ingest_inventory(
     if payload.collected_at_epoch is not None and payload.collected_at_epoch > time.time() + 300:
         raise ValueError("collected_at_epoch is in the future")
 
-    inventory = payload.model_dump(mode="json", exclude_none=False)
-    db.store_inventory(agent_id, inventory, max_history=settings.agent_inventory_history_limit)
+    with db.transaction():
+        inventory = payload.model_dump(mode="json", exclude_none=False)
+        db.store_inventory(agent_id, inventory, max_history=settings.agent_inventory_history_limit)
 
-    excluded_ifaces = {i.lower() for i in settings.discovery_excluded_interface_list}
-    observations = []
-    claimed_ips: list[str] = []
-    for iface in payload.interfaces:
-        claimed_ips.extend(iface.ipv4 or [])
-        claimed_ips.extend(iface.ipv6 or [])
-        if (iface.name or "").lower() in excluded_ifaces:
-            continue
-        classification = iface.classification or classify_interface(iface)
-        for cidr in iface.connected_networks or []:
-            normalized = _normalize_cidr(cidr)
-            if normalized is None:
+        excluded_ifaces = {i.lower() for i in settings.discovery_excluded_interface_list}
+        observations = []
+        claimed_ips: list[str] = []
+        for iface in payload.interfaces:
+            claimed_ips.extend(iface.ipv4 or [])
+            claimed_ips.extend(iface.ipv6 or [])
+            if (iface.name or "").lower() in excluded_ifaces:
                 continue
-            observations.append({
-                "interface": iface.name,
-                "cidr": normalized,
-                "classification": classification,
-                "connected": (iface.status or "up") == "up",
-            })
-    if observations:
-        db.record_network_observations(agent_id, observations)
-    if claimed_ips:
-        db.agent_heartbeat(agent_id, claimed_ips=claimed_ips)
+            classification = iface.classification or classify_interface(iface)
+            for cidr in iface.connected_networks or []:
+                normalized = _normalize_cidr(cidr)
+                if normalized is None:
+                    continue
+                observations.append({
+                    "interface": iface.name,
+                    "cidr": normalized,
+                    "classification": classification,
+                    "connected": (iface.status or "up") == "up",
+                })
+        if observations:
+            db.record_network_observations(agent_id, observations)
+        if claimed_ips:
+            db.agent_heartbeat(agent_id, claimed_ips=claimed_ips)
 
     return {
         "stored": True,

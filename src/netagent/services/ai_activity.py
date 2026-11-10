@@ -175,7 +175,7 @@ def traced_chat(
             trace.mark("RESPONSE_RECEIVED")
             return text
         try:
-            text = llm.chat(messages, max_tokens=max_tokens)
+            text = llm.chat(messages, max_tokens=max_tokens, response_format=response_format)
             _record_stream_meta(llm, trace)
         except LLMTruncated:
             _record_stream_meta(llm, trace)

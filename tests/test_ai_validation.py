@@ -154,6 +154,7 @@ def _batch_settings_with_two_alerts(db, settings) -> list[int]:
 
 
 def test_batch_unknown_and_duplicate_ids_skipped_not_attributed(db, settings):
+    settings.ai_analysis_batch_size = 5
     _seed_alert(db)
     ev = {
         "ts": "2026-11-01T10:01:00+00:00", "ts_epoch": 1793594460.0,

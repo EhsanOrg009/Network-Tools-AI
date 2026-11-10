@@ -29,7 +29,6 @@ from typing import Any
 
 from netagent.agent.llm_client import (
     LLMClient,
-    LLMStructuredUnsupported,
     LLMUnavailable,
 )
 from netagent.config import Settings
@@ -244,8 +243,6 @@ class AlertAnalysisWorker:
         self._thread: threading.Thread | None = None
         self._failure_streak = 0
         self._batch_consecutive_failures = 0
-        # structured outputs stay on unless the provider itself rejects them
-        self._structured_outputs_disabled = False
 
     # -- queue maintenance ------------------------------------------------------
 
@@ -326,23 +323,14 @@ class AlertAnalysisWorker:
         return analysis
 
     def _chat_with_structured_fallback(self, call, schema: dict[str, Any], name: str) -> str:
-        """Run the model with a json_schema ``response_format``; if the local
-        provider rejects structured outputs (never timout etc.), remember the
-        rejection and retry the same request once without them."""
+        """Preserve configured Structured Outputs on every request."""
         rf = (
             {"type": "json_schema", "json_schema": {
                 "name": name, "strict": True, "schema": schema}}
-            if (self.settings.llm_structured_outputs and not self._structured_outputs_disabled)
+            if self.settings.llm_structured_outputs
             else None
         )
-        if rf is None:
-            return call(None)
-        try:
-            return call(rf)
-        except LLMStructuredUnsupported:
-            log.warning("provider rejects structured outputs; falling back permanently")
-            self._structured_outputs_disabled = True
-            return call(None)
+        return call(rf)
 
     def _batch_memory_context(
         self, alerts: list[dict[str, Any]],

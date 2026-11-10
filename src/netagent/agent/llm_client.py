@@ -15,6 +15,11 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+from functools import wraps
+
+import httpx
 
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
@@ -23,6 +28,32 @@ from netagent.config import Settings
 
 class LLMUnavailable(RuntimeError):
     """The LLM endpoint is unreachable, timed out, or answered unusably."""
+
+
+class LLMTimeout(LLMUnavailable):
+    """Generation timed out; the server may still be finishing it."""
+
+
+class LLMBusy(LLMUnavailable):
+    """No request was sent: another generation or timeout cooldown is active."""
+
+
+def _serialized(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        self._ensure_runtime()
+        if not self._generation_lock.acquire(blocking=False):
+            raise LLMBusy("model generation already in progress")
+        try:
+            if time.monotonic() < self._cooldown_until:
+                raise LLMBusy("model is cooling down after a timed-out request")
+            return method(self, *args, **kwargs)
+        except LLMTimeout:
+            self._cooldown_until = time.monotonic() + self.settings.llm_timeout_cooldown_seconds
+            raise
+        finally:
+            self._generation_lock.release()
+    return run
 
 
 class LLMContextTooLong(RuntimeError):
@@ -84,13 +115,47 @@ def _classify_provider_error(exc: Exception) -> RuntimeError:
 
 
 class LLMClient:
+    _runtime_init_lock = threading.Lock()
+
+    def _ensure_runtime(self):
+        with self._runtime_init_lock:
+            if not hasattr(self, "_metadata"):
+                self._metadata = threading.local()
+                self._generation_lock = threading.Lock()
+                self._cooldown_until = 0.0
+
+    @property
+    def last_finish_reason(self):
+        self._ensure_runtime()
+        return getattr(self._metadata, "finish_reason", None)
+
+    @last_finish_reason.setter
+    def last_finish_reason(self, value):
+        self._ensure_runtime()
+        self._metadata.finish_reason = value
+
+    @property
+    def last_usage(self):
+        self._ensure_runtime()
+        return getattr(self._metadata, "usage", None)
+
+    @last_usage.setter
+    def last_usage(self, value):
+        self._ensure_runtime()
+        self._metadata.usage = value
+
+    def _request_timeout(self):
+        from netagent.services.job_control import bounded_timeout
+        return httpx.Timeout(bounded_timeout(self.settings.llm_timeout_seconds),
+                             connect=bounded_timeout(self.settings.llm_connect_timeout_seconds))
+
     def __init__(self, settings: Settings):
         self._settings = settings
         self._client = OpenAI(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
-            timeout=settings.llm_timeout_seconds,
-            max_retries=1,
+            timeout=self._request_timeout(),
+            max_retries=0,
         )
         self.model = settings.llm_model
         # observability of the *last* real completion (single-writer worker);
@@ -102,6 +167,7 @@ class LLMClient:
     def settings(self) -> Settings:
         return self._settings
 
+    @_serialized
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -127,12 +193,13 @@ class LLMClient:
                 max_tokens=max_tokens or s.llm_max_output_tokens,
                 stream=False,
             )
-            from netagent.services.job_control import bounded_timeout
-            kwargs["timeout"] = bounded_timeout(s.llm_timeout_seconds)
+            kwargs["timeout"] = self._request_timeout()
             if response_format is not None:
                 kwargs["response_format"] = response_format
             response = self._client.chat.completions.create(**kwargs)
-        except (APITimeoutError, APIConnectionError) as exc:
+        except APITimeoutError as exc:
+            raise LLMTimeout("LLM request failed: APITimeoutError") from exc
+        except APIConnectionError as exc:
             raise LLMUnavailable(f"LLM request failed: {exc.__class__.__name__}") from exc
         except Exception as exc:  # openai raises several internals types
             raise _classify_provider_error(exc) from exc
@@ -163,6 +230,7 @@ class LLMClient:
 
     # -- streaming ------------------------------------------------------------
 
+    @_serialized
     def chat_stream(
         self,
         messages: list[dict[str, str]],
@@ -194,12 +262,15 @@ class LLMClient:
                 stream=True,
                 stream_options={"include_usage": True},
             )
-            from netagent.services.job_control import bounded_timeout
-            kwargs["timeout"] = bounded_timeout(s.llm_timeout_seconds)
+            from netagent.services.job_control import bounded_timeout, checkpoint
+            deadline = time.monotonic() + bounded_timeout(s.llm_timeout_seconds)
+            kwargs["timeout"] = self._request_timeout()
             if response_format is not None:
                 kwargs["response_format"] = response_format
             stream = self._client.chat.completions.create(**kwargs)
-        except (APITimeoutError, APIConnectionError) as exc:
+        except APITimeoutError as exc:
+            raise LLMTimeout("LLM request failed: APITimeoutError") from exc
+        except APIConnectionError as exc:
             raise LLMUnavailable(f"LLM request failed: {exc.__class__.__name__}") from exc
         except Exception as exc:
             raise _classify_provider_error(exc) from exc
@@ -210,6 +281,9 @@ class LLMClient:
         usage: object | None = None
         try:
             for chunk in stream:
+                if time.monotonic() >= deadline:
+                    raise LLMTimeout("LLM stream exceeded generation deadline")
+                checkpoint()
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
                     usage = chunk_usage
@@ -227,8 +301,14 @@ class LLMClient:
                         first_token_logged = True
                         first_token_cb()
                     parts.append(content)
-        except (APITimeoutError, APIConnectionError) as exc:
+        except APITimeoutError as exc:
+            raise LLMTimeout("LLM stream failed: APITimeoutError") from exc
+        except APIConnectionError as exc:
             raise LLMUnavailable(f"LLM stream failed: {exc.__class__.__name__}") from exc
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
 
         self.last_finish_reason = finish
         self.last_usage = usage

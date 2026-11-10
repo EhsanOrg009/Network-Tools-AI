@@ -67,10 +67,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_API_KEY", "MSTY_API_KEY"),
     )
     llm_model: str = Field(
-        default="gemma4-local:latest",
+        default="gemma-4-e4b:latest",
         validation_alias=AliasChoices("LLM_MODEL", "MSTY_MODEL"),
     )
-    llm_timeout_seconds: float = 180.0
+    llm_timeout_seconds: float = Field(default=600.0, ge=1, le=1800)
+    llm_connect_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30)
+    llm_timeout_cooldown_seconds: float = Field(default=60.0, ge=1, le=1800)
     llm_max_output_tokens: int = 4096
     llm_max_input_chars: int = 12000
     llm_temperature: float = 0.2
@@ -177,7 +179,7 @@ class Settings(BaseSettings):
     # severity) share one model request to cut request count on weak local
     # hardware. Each alert still gets its own stored result; uncovered items
     # fall back to individual analysis. 1 disables batching.
-    ai_analysis_batch_size: int = Field(default=5, ge=1, le=10)
+    ai_analysis_batch_size: int = Field(default=1, ge=1, le=10)
     # Anti-starvation: every this-many minutes of waiting improves a queued
     # row's effective priority by one level (bounded), so low-priority events
     # eventually get analyzed even under a constant critical-event stream.

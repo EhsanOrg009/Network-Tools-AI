@@ -3,8 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import type { AgentSummary } from "../lib/types";
 import { faNum, fmtAgo, fmtDateTime } from "../lib/format";
-import { Card, EmptyState, ErrorState, SkeletonRows, StatusPill, TechChip, ConfirmDialog } from "../components/ui";
-import { IconSearch } from "../components/icons";
+import { Card, StatCard, EmptyState, ErrorState, SkeletonRows, StatusPill, TechChip, ConfirmDialog } from "../components/ui";
+import { IconSearch, IconAgents, IconHeartbeat, IconOff } from "../components/icons";
 import { useToast } from "../components/toast";
 
 type SortKey = "status" | "hostname" | "platform" | "enrolled_at" | "last_heartbeat_at";
@@ -54,7 +54,7 @@ export default function AgentsPage() {
     items.sort((a, b) => {
       let r = 0;
       if (sort.key === "status") r = (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
-      else if (sort.key === "hostname") r = (a.hostname ?? "").localeCompare(b.hostname ?? "");
+      else if (sort.key === "hostname" || sort.key === "platform") r = (a[sort.key] ?? "").localeCompare(b[sort.key] ?? "");
       else r = new Date(a[sort.key] ?? 0).getTime() - new Date(b[sort.key] ?? 0).getTime();
       return r * sort.dir;
     });
@@ -82,6 +82,11 @@ export default function AgentsPage() {
 
   return (
     <div>
+      {agents && <div className="stats-grid">
+        <StatCard label="عامل‌های آنلاین" value={faNum(agents.filter((a) => a.status === "active").length)} icon={<IconAgents size={18} />} color="var(--ok)" hint="با ضربان تازه در هسته" />
+        <StatCard label="بدون ضربان تازه" value={faNum(agents.filter((a) => a.status === "stale").length)} icon={<IconHeartbeat size={18} />} color="var(--warn)" hint="نیازمند بررسی ارتباط دستگاه" />
+        <StatCard label="دسترسی باطل‌شده" value={faNum(agents.filter((a) => a.status === "revoked").length)} icon={<IconOff size={18} />} color="var(--muted)" hint="تاریخچه و شناسه محفوظ است" />
+      </div>}
       <div className="card card-pad" style={{ marginBottom: 14 }}>
         <div className="row wrap">
           <div style={{ width: "min(300px, 100%)" }}>
@@ -127,13 +132,13 @@ export default function AgentsPage() {
             <table className="data">
               <thead>
                 <tr>
-                  <th style={{ cursor: "pointer" }} onClick={() => toggleSort("hostname")}>Hostname</th>
+                  <th aria-sort={sort.key === "hostname" ? sort.dir === 1 ? "ascending" : "descending" : "none"}><button onClick={() => toggleSort("hostname")}>نام میزبان ↕</button></th>
                   <th>IPهای اعلامی</th>
-                  <th style={{ cursor: "pointer" }} onClick={() => toggleSort("platform")}>سیستم‌عامل</th>
+                  <th aria-sort={sort.key === "platform" ? sort.dir === 1 ? "ascending" : "descending" : "none"}><button onClick={() => toggleSort("platform")}>سیستم‌عامل ↕</button></th>
                   <th>نسخه عامل</th>
-                  <th style={{ cursor: "pointer" }} onClick={() => toggleSort("status")}>وضعیت</th>
-                  <th style={{ cursor: "pointer" }} onClick={() => toggleSort("last_heartbeat_at")}>آخرین ضربان</th>
-                  <th style={{ cursor: "pointer" }} onClick={() => toggleSort("enrolled_at")}>ثبت‌نام</th>
+                  <th><button onClick={() => toggleSort("status")}>وضعیت ↕</button></th>
+                  <th><button onClick={() => toggleSort("last_heartbeat_at")}>آخرین ضربان ↕</button></th>
+                  <th><button onClick={() => toggleSort("enrolled_at")}>ثبت‌نام ↕</button></th>
                   <th></th>
                 </tr>
               </thead>
@@ -141,7 +146,7 @@ export default function AgentsPage() {
                 {filtered.map((a) => (
                   <tr key={a.id} className="clickable" onClick={() => navigate(`/dashboard/agents/${a.id}`)}>
                     <td>
-                      <div style={{ fontWeight: 600 }}>{a.hostname ?? "—"}</div>
+                      <button className="btn ghost sm technical" onClick={() => navigate(`/dashboard/agents/${a.id}`)}>{a.hostname ?? "—"}</button>
                       <TechChip>{a.id}</TechChip>
                     </td>
                     <td className="technical small">{(a.claimed_ips ?? [])[0] ?? "—"}</td>

@@ -1,147 +1,121 @@
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
-import { useMemo, useSyncExternalStore } from "react";
+import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from "react";
 import { api, hasToken, setToken, subscribeAuth } from "./lib/api";
 import { ThemeProvider, useTheme } from "./lib/theme";
 import { useLiveFeed } from "./lib/live";
 import {
   IconGauge, IconAgents, IconInbox, IconWifi, IconShield, IconBrain,
-  IconGear, IconSun, IconMoon, IconLogout,
+  IconGear, IconSun, IconMoon, IconLogout, IconBook, IconHeartbeat,
+  IconCheck, IconMenu, IconX, IconChevron, IconNodes,
 } from "./components/icons";
 import { TokenGate } from "./components/gate";
-import OverviewPage from "./pages/Overview";
-import AgentsPage from "./pages/Agents";
-import PendingAgentsPage from "./pages/PendingAgents";
-import AgentDetailPage from "./pages/AgentDetail";
-import DiscoveryPage from "./pages/Discovery";
-import SecurityPage from "./pages/Security";
-import InvestigationsPage from "./pages/Investigations";
-import AIActivityPage from "./pages/AIActivity";
-import AIKnowledgePage from "./pages/AIKnowledge";
-import AIActionsPage from "./pages/AIActions";
-import SettingsPage from "./pages/SettingsPage";
+import { SkeletonRows } from "./components/ui";
+
+const OverviewPage = lazy(() => import("./pages/Overview"));
+const AgentsPage = lazy(() => import("./pages/Agents"));
+const PendingAgentsPage = lazy(() => import("./pages/PendingAgents"));
+const AgentDetailPage = lazy(() => import("./pages/AgentDetail"));
+const DiscoveryPage = lazy(() => import("./pages/Discovery"));
+const SecurityPage = lazy(() => import("./pages/Security"));
+const InvestigationsPage = lazy(() => import("./pages/Investigations"));
+const AIActivityPage = lazy(() => import("./pages/AIActivity"));
+const AIKnowledgePage = lazy(() => import("./pages/AIKnowledge"));
+const AIActionsPage = lazy(() => import("./pages/AIActions"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 const NAV = [
-  { to: "/dashboard", label: "نمای کلی", icon: IconGauge, exact: true },
-  { to: "/dashboard/agents", label: "عامل‌ها", icon: IconAgents },
-  { to: "/dashboard/pending", label: "در انتظار تأیید", icon: IconInbox },
-  { to: "/dashboard/discovery", label: "کشف شبکه", icon: IconWifi },
-  { to: "/dashboard/security", label: "مرکز امنیت", icon: IconShield },
-  { to: "/dashboard/investigations", label: "بررسی‌های هوشمند", icon: IconBrain },
-  { to: "/dashboard/ai-activity", label: "فعالیت هوش مصنوعی", icon: IconBrain },
-  { to: "/dashboard/ai-knowledge", label: "حافظه‌ی هوشمند", icon: IconBrain },
-  { to: "/dashboard/ai-actions", label: "پیشنهادهای هوشمند", icon: IconBrain },
-  { to: "/dashboard/settings", label: "تنظیمات", icon: IconGear },
+  { to: "/dashboard", label: "نمای کلی", icon: IconGauge, group: "پایش و عملیات", description: "دید یکپارچه از شبکه، هشدارها و کارهای در انتظار شما.", code: "OVERVIEW" },
+  { to: "/dashboard/security", label: "مرکز امنیت", icon: IconShield, group: "پایش و عملیات", description: "از رویداد تا بینش؛ تحلیل امنیت با کنترل مستقیم شما.", code: "SECURITY OPERATIONS" },
+  { to: "/dashboard/agents", label: "عامل‌ها", icon: IconAgents, group: "پایش و عملیات", description: "وضعیت ارتباط، موجودی سیستم و ابزارهای مدیریت نقاط پایانی.", code: "ENDPOINTS" },
+  { to: "/dashboard/discovery", label: "کشف شبکه", icon: IconWifi, group: "پایش و عملیات", description: "شبکه‌های مشاهده‌شده و محدودهٔ مجاز برای کشف و عیب‌یابی.", code: "NETWORK DISCOVERY" },
+  { to: "/dashboard/investigations", label: "بررسی‌های هوشمند", icon: IconBrain, group: "هوش و تحلیل", description: "بررسی شواهد شبکه و پاسخ به پرسش‌های عملیاتی.", code: "INVESTIGATIONS" },
+  { to: "/dashboard/ai-activity", label: "فعالیت هوش مصنوعی", icon: IconHeartbeat, group: "هوش و تحلیل", description: "خط زمانی درخواست‌های واقعی، زمان پاسخ و وضعیت مدل محلی.", code: "AI ACTIVITY" },
+  { to: "/dashboard/ai-knowledge", label: "حافظهٔ هوشمند", icon: IconBook, group: "هوش و تحلیل", description: "دانش تأییدشدهٔ شبکه و پرسش از مدل بر پایهٔ شواهد.", code: "KNOWLEDGE" },
+  { to: "/dashboard/ai-actions", label: "پیشنهادهای هوشمند", icon: IconCheck, group: "هوش و تحلیل", description: "پیشنهادهای مدل برای بررسی و تصمیم صریح مدیر.", code: "ACTION PROPOSALS" },
+  { to: "/dashboard/pending", label: "در انتظار تأیید", icon: IconInbox, group: "مدیریت", description: "بازبینی هویت دستگاه‌ها و تصمیم دربارهٔ ورود به شبکهٔ مدیریت.", code: "APPROVAL DESK" },
+  { to: "/dashboard/settings", label: "تنظیمات", icon: IconGear, group: "مدیریت", description: "پیکربندی هسته، اتصال مدل و ترجیحات این مرورگر.", code: "CONFIGURATION" },
 ];
 
-function Sidebar() {
-  return (
-    <aside className="sidebar">
-      <div className="brand">
-        <div className="brand-logo">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" />
-            <circle cx="5" cy="6" r="2" />
-            <circle cx="19" cy="6" r="2" />
-            <circle cx="5" cy="18" r="2" />
-            <circle cx="19" cy="18" r="2" />
-            <path d="M6.8 7.2 10 10.6M17.2 7.2 14 10.6M6.8 16.8 10 13.4M17.2 16.8 14 13.4" />
-          </svg>
-        </div>
-        <div className="brand-text small">
-          عامل پایش و عیب‌یابی شبکه
-          <small>داشبورد مدیریتی</small>
-        </div>
-      </div>
-      <nav>
-        <div className="nav-section">عملیات</div>
-        {NAV.filter((n) => n.to !== "/dashboard/settings").map(({ to, label, icon: Icon, exact }) => (
-          <NavLink key={to} to={to} end={exact} className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
-            <Icon size={18} />
-            <span className="nav-label">{label}</span>
-          </NavLink>
-        ))}
-        <div className="nav-section">سامانه</div>
-        <NavLink to="/dashboard/settings" className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
-          <IconGear size={18} />
-          <span className="nav-label">تنظیمات</span>
-        </NavLink>
+function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <>
+    {open && <button className="nav-backdrop" aria-label="بستن منو" onClick={onClose} />}
+    <aside id="main-navigation" className={`sidebar${open ? " is-open" : ""}`}>
+      <NavLink to="/dashboard" className="brand" onClick={onClose}>
+        <span className="brand-logo"><IconNodes size={24} /></span>
+        <span className="brand-text"><b dir="ltr">NetAgent<span className="brand-period">.</span></b><small>مرکز عملیات شبکه</small></span>
+      </NavLink>
+      <button className="btn ghost sm nav-close" aria-label="بستن منو" onClick={onClose}><IconX size={18} /></button>
+      <nav aria-label="ناوبری اصلی">
+        {["پایش و عملیات", "هوش و تحلیل", "مدیریت"].map((group) => <div key={group} className="nav-group">
+          <div className="nav-section">{group}</div>
+          {NAV.filter((item) => item.group === group).map(({ to, label, icon: Icon }) =>
+            <NavLink key={to} to={to} end={to === "/dashboard"} title={label} onClick={onClose}
+              className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
+              <Icon size={18} /><span className="nav-label">{label}</span>
+            </NavLink>)}
+        </div>)}
       </nav>
       <div className="sidebar-footer">
-        <div>مستندات فنی API:</div>
-        <a href="/api/docs" target="_blank" rel="noreferrer" className="technical">/api/docs</a>
+        <div className="sidebar-footnote"><IconShield size={16} /><span>پایش، بررسی و تصمیم آگاهانه</span></div>
+        <a href="/api/docs" target="_blank" rel="noreferrer">مستندات API <IconChevron size={13} /></a>
+        <span className="sidebar-caption" dir="ltr">LOCAL INTELLIGENCE · NETWORK VISIBILITY</span>
       </div>
     </aside>
-  );
+  </>;
 }
 
-function AppBar() {
+function AppBar({ onMenu, menuOpen }: { onMenu: () => void; menuOpen: boolean }) {
   const { theme, toggle } = useTheme();
   const feed = useLiveFeed(20000, async () => {
-    try {
-      await api.get("/api/dashboard/v1/healthz");
-      return true;
-    } catch {
-      return false;
-    }
+    await api.get("/api/dashboard/v1/healthz");
+    return true;
   });
   const location = useLocation();
-  const title = useMemo(() => {
-    if (location.pathname.startsWith("/dashboard/agents/")) return "جزئیات عامل";
-    const m = NAV.find((n) =>
-      n.exact ? location.pathname === n.to : location.pathname === n.to,
-    );
-    return m?.label ?? "داشبورد";
-  }, [location.pathname]);
-
-  const tehranClock = new Intl.DateTimeFormat("fa-IR", {
-    timeZone: "Asia/Tehran", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-  });
-
-  return (
-    <header className="appbar">
-      <div>
-        <div className="page-title">{title}</div>
-      </div>
-      <div className="spacer" />
-      <span
-        className={`connection-chip${feed.ok ? "" : " lost"}`}
-        title={feed.ok ? "اتصال به هسته‌ی مرکزی برقرار است" : "ارتباط قطع است؛ داده‌ها قدیمی‌اند"}
-      >
-        <span className="dot" />
-        {feed.ok ? "متصل" : "قطع"}
-        {feed.ok && feed.lastSync !== null && (
-          <span className="sync-fine">{tehranClock.format(feed.lastSync)}</span>
-        )}
-      </span>
-      <button className="btn ghost sm" onClick={toggle} aria-label="تغییر پوسته" title={theme === "dark" ? "حالت روشن" : "حالت تیره"}>
-        {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
+  const title = location.pathname.startsWith("/dashboard/agents/") ? "جزئیات عامل" : NAV.find((n) => n.to === location.pathname)?.label ?? "نمای کلی";
+  return <header className="appbar">
+    <button className="btn ghost icon-btn nav-menu" onClick={onMenu} aria-label="بازکردن منوی ناوبری" aria-expanded={menuOpen} aria-controls="main-navigation"><IconMenu size={20} /></button>
+    <div className="breadcrumb"><IconNodes size={16} /><span>مرکز عملیات</span><IconChevron size={12} /><b>{title}</b></div>
+    <div className="spacer" />
+    <span className={`connection-chip${!feed.checked ? " checking" : feed.ok ? "" : " lost"}`} role="status"
+      title={feed.ok && feed.lastSync ? "اتصال به هستهٔ مرکزی برقرار است" : "داده‌های قبلی ممکن است به‌روز نباشند"}>
+      <span className="dot" />{!feed.checked ? "بررسی اتصال" : feed.ok ? "هسته متصل" : "ارتباط قطع"}
+    </span>
+    <div className="appbar-actions">
+      <button className="btn ghost icon-btn" onClick={toggle} aria-label="تغییر پوسته" title={theme === "dark" ? "حالت روشن" : "حالت تیره"}>
+        {theme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />}
       </button>
-      <button
-        className="btn ghost sm"
-        onClick={() => { setToken(""); window.location.reload(); }}
-        title="خروج (پاک‌کردن توکن از این مرورگر)"
-      >
-        <IconLogout size={16} />
-      </button>
-    </header>
-  );
+      <button className="btn ghost icon-btn" onClick={() => setToken("")} aria-label="خروج از داشبورد" title="خروج"><IconLogout size={17} /></button>
+      <span className="operator-avatar" title="مدیر شبکه">م</span>
+    </div>
+  </header>;
 }
 
 function ShellInner() {
   const authenticated = useSyncExternalStore(subscribeAuth, hasToken);
-  if (!authenticated) {
-    return (
-      <div style={{ display: "grid", placeItems: "center", minHeight: "100vh", padding: 20 }}>
-        <TokenGate />
-      </div>
-    );
-  }
-  return (
-    <div className="shell">
-      <Sidebar />
-      <div className="shell-content">
-        <AppBar />
-        <main className="page">
+  const [menuOpen, setMenuOpen] = useState(false);
+  const location = useLocation();
+  useEffect(() => { setMenuOpen(false); }, [location.pathname]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("keydown", escape);
+    return () => document.removeEventListener("keydown", escape);
+  }, [menuOpen]);
+  if (!authenticated) return <TokenGate />;
+  const meta = location.pathname.startsWith("/dashboard/agents/")
+    ? { ...NAV[2], label: "جزئیات عامل", code: "ENDPOINT WORKSPACE" }
+    : NAV.find((n) => n.to === location.pathname) ?? NAV[0];
+  return <div className="shell">
+    <a className="skip-link" href="#page-content">رفتن به محتوای صفحه</a>
+    <Sidebar open={menuOpen} onClose={() => setMenuOpen(false)} />
+    <div className="shell-content">
+      <AppBar onMenu={() => setMenuOpen((v) => !v)} menuOpen={menuOpen} />
+      <main className="page" id="page-content">
+        <div className="page-heading">
+          <div><div className="eyebrow" dir="ltr">{meta.code}</div><h1>{meta.label}</h1><p>{meta.description}</p></div>
+          <div className="page-heading-context"><span className="date-line">{new Intl.DateTimeFormat("fa-IR", { dateStyle: "full", timeZone: "Asia/Tehran" }).format(new Date())}</span><span className="small muted">فضای کاری مدیر شبکه</span></div>
+        </div>
+        <Suspense fallback={<div className="card" role="status" aria-label="در حال بارگیری صفحه"><SkeletonRows /></div>}>
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<OverviewPage />} />
@@ -157,16 +131,13 @@ function ShellInner() {
             <Route path="/dashboard/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
-        </main>
-      </div>
+        </Suspense>
+        <footer className="page-footer"><span dir="ltr">NetAgent / Network Operations</span><span>داده‌های واقعی · تحلیل محلی · تصمیم با مدیر</span></footer>
+      </main>
     </div>
-  );
+  </div>;
 }
 
 export default function App() {
-  return (
-    <ThemeProvider>
-      <ShellInner />
-    </ThemeProvider>
-  );
+  return <ThemeProvider><ShellInner /></ThemeProvider>;
 }

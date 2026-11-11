@@ -6,12 +6,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface Feed {
+  checked: boolean;
   ok: boolean;
   lastSync: number | null; // epoch ms of last successful sync
 }
 
 export function useLiveFeed(pollMs = 20000, asyncCheck: () => Promise<boolean>) {
-  const [feed, setFeed] = useState<Feed>({ ok: true, lastSync: null });
+  const [feed, setFeed] = useState<Feed>({ checked: false, ok: false, lastSync: null });
   const [tick, setTick] = useState(0);
   const check = useRef(asyncCheck);
   const inFlight = useRef<Promise<boolean> | null>(null);
@@ -30,7 +31,7 @@ export function useLiveFeed(pollMs = 20000, asyncCheck: () => Promise<boolean>) 
       const ok = await pending;
       if (inFlight.current === pending) inFlight.current = null;
       if (cancelled) return;
-      setFeed((f) => ({ ok, lastSync: ok ? Date.now() : f.lastSync }));
+      setFeed((f) => ({ checked: true, ok, lastSync: ok ? Date.now() : f.lastSync }));
       timer = window.setTimeout(() => { void run(); }, pollMs);
     };
     void run();

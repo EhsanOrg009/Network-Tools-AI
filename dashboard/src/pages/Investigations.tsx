@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import type { AgentSummary, HostRow, Investigation } from "../lib/types";
 import { faNum, fmtAgo, fmtDateTime } from "../lib/format";
-import { Card, EmptyState, ErrorState, SkeletonRows, StatusPill, TechChip } from "../components/ui";
+import { Card, Dialog, EmptyState, ErrorState, SkeletonRows, StatusPill, TechChip } from "../components/ui";
 import { IconBrain } from "../components/icons";
 
 type Mode = "quick" | "deep";
@@ -272,10 +272,8 @@ export default function InvestigationsPage() {
       </Card>
 
       {detail && (
-        <div className="modal-backdrop" onClick={() => setDetail(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <Dialog title={`گزارش بررسی #${detail.id}`} onClose={() => setDetail(null)} wide>
             <div className="row" style={{ marginBottom: 10, gap: 10 }}>
-              <h3 style={{ fontSize: 15 }}>گزارش بررسی #{detail.id}</h3>
               <StatusPill state={detail.status} />
             </div>
             <dl className="two-col-defs small">
@@ -304,8 +302,7 @@ export default function InvestigationsPage() {
               <div className="spacer" />
               <button className="btn ghost" onClick={() => setDetail(null)}>بستن</button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       )}
     </div>
   );

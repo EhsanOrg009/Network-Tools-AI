@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import type { AlertRow } from "../lib/types";
 import { faNum, fmtAgo, fmtDateTime, severityLabel } from "../lib/format";
-import { Card, EmptyState, ErrorState, SkeletonRows, TechChip } from "../components/ui";
+import { Card, Dialog, EmptyState, ErrorState, MiniSpinner, SkeletonRows, TechChip } from "../components/ui";
 import { BarList, CHART_COLORS } from "../components/charts";
 import { IconShield, IconAlert } from "../components/icons";
 
@@ -239,52 +239,60 @@ export default function SecurityPage() {
 
   return (
     <div>
-      <div className="card card-pad" style={{ marginBottom: 14 }}>
-        <div className="row wrap" style={{ gap: 12 }}>
-          <b>تحلیل خودکار هوش مصنوعی</b>
-          <button className="btn" role="switch" aria-label="تحلیل خودکار هوش مصنوعی"
-            aria-checked={aiStatus?.auto_enabled ?? false} disabled={autoBusy || !aiStatus}
+      <section className="card security-control" aria-label="کنترل تحلیل امنیت">
+        <div className="security-mode">
+          <span className="security-mode-icon"><IconShield size={23} /></span>
+          <div className="security-mode-copy"><h2>تحلیل خودکار هوش مصنوعی</h2>
+            <p>{aiStatus?.auto_enabled ? "هشدارهای تازه با ظرفیت کنترل‌شده وارد صف تحلیل می‌شوند." : "دریافت و ذخیرهٔ هشدارها ادامه دارد؛ تحلیل تکی با انتخاب شما انجام می‌شود."}</p>
+          </div>
+          <button className="btn auto-switch" role="switch" aria-label="تحلیل خودکار هوش مصنوعی"
+            aria-checked={aiStatus?.auto_enabled ?? false} disabled={autoBusy || !aiStatus || backlogLimit < 1 || backlogLimit > 200}
             onClick={() => { void toggleAuto(); }}>
-            {aiStatus ? (aiStatus.auto_enabled ? "روشن — ON" : "خاموش — OFF") : "در حال دریافت وضعیت…"}
+            {autoBusy && <MiniSpinner />}
+            {aiStatus ? (aiStatus.auto_enabled ? "روشن — ON" : "خاموش — OFF") : "دریافت وضعیت…"}
           </button>
-          <span className="small muted">در حالت خاموش صف خودکار متوقف می‌ماند؛ تحلیل دستی مستقل است.</span>
         </div>
-        <div className="row wrap small" style={{ marginTop: 12 }}>
-          <label htmlFor="backlog-policy">هنگام روشن‌کردن:</label>
-          <select id="backlog-policy" className="input" style={{ width: 260 }} disabled={autoBusy || aiStatus?.auto_enabled}
-            value={backlogPolicy} onChange={(e) => setBacklogPolicy(e.target.value as typeof backlogPolicy)}>
-            <option value="future_only">فقط هشدارهای آینده</option>
-            <option value="recent_unprocessed">آخرین هشدارهای تحلیل‌نشده</option>
-          </select>
-          {backlogPolicy === "recent_unprocessed" && <label className="row">حداکثر
-            <input aria-label="تعداد هشدارهای قدیمی" type="number" className="input" style={{ width: 90 }} min={1} max={200}
-              disabled={autoBusy || aiStatus?.auto_enabled} value={backlogLimit} onChange={(e) => setBacklogLimit(Number(e.target.value))} />
-            هشدار (۱ تا ۲۰۰)</label>}
-          <span className="muted">تحلیل‌های شروع‌شده تکمیل می‌شوند؛ کارهای منتظر تا روشن‌کردن یا درخواست تکی محفوظ‌اند.</span>
+        {aiStatus && <div className="security-queue">
+          {([{ label: "در صف تحلیل", value: aiStatus.counts.PENDING }, { label: "در حال پردازش", value: aiStatus.counts.PROCESSING },
+            { label: "تحلیل تکمیل‌شده", value: aiStatus.counts.COMPLETED }, { label: "تحلیل ناموفق", value: aiStatus.counts.FAILED }]).map((item) =>
+              <div className="security-queue-item" key={item.label}><span>{item.label}</span><b>{faNum(item.value)}</b></div>)}
+        </div>}
+        <div className="security-control-body">
+          <div className="row wrap small" style={{ marginTop: 16 }}>
+            <label htmlFor="backlog-policy">هنگام روشن‌کردن:</label>
+            <select id="backlog-policy" className="input" style={{ width: 260 }} disabled={autoBusy || aiStatus?.auto_enabled}
+              value={backlogPolicy} onChange={(e) => setBacklogPolicy(e.target.value as typeof backlogPolicy)}>
+              <option value="future_only">فقط هشدارهای آینده</option>
+              <option value="recent_unprocessed">آخرین هشدارهای تحلیل‌نشده</option>
+            </select>
+            {backlogPolicy === "recent_unprocessed" && <label className="row">حداکثر
+              <input aria-label="تعداد هشدارهای قدیمی" type="number" className="input" style={{ width: 90 }} min={1} max={200}
+                disabled={autoBusy || aiStatus?.auto_enabled} value={backlogLimit} onChange={(e) => setBacklogLimit(Number(e.target.value))} /> هشدار (۱ تا ۲۰۰)
+            </label>}
+          </div>
+          <p className="small muted" style={{ marginTop: 12 }}>خاموش‌کردن، کارهای خودکارِ منتظر را متوقف می‌کند. تحلیل‌های شروع‌شده تکمیل می‌شوند و تحلیل دستی همیشه مستقل است.</p>
+          {aiStatus && <>
+            <div className="row wrap small" style={{ marginTop: 14, gap: 18 }}>
+              <span className={aiStatus.connection.ok ? "badge badge-ok" : "badge badge-danger"}>{aiStatus.connection.ok ? "مدل متصل" : "مدل در دسترس نیست"}</span>
+              <bdi className="technical muted">{aiStatus.model}</bdi>
+              <span className="muted">خودکار متوقف: {faNum(aiStatus.paused_automatic ?? 0)}</span>
+              <span className="muted">بدون درخواست: {faNum(aiStatus.unprocessed ?? 0)}</span>
+              <span className="muted">ظرفیت پردازش: {faNum(aiStatus.capacity ?? 200)}</span>
+            </div>
+            {!aiStatus.connection.ok && <p className="small" style={{ marginTop: 8, color: "var(--danger)" }}>وضعیت اتصال مدل: <bdi>{aiStatus.connection.detail}</bdi></p>}
+            {!aiStatus.worker_enabled && <p className="small" style={{ marginTop: 8, color: "var(--warn)" }}>worker تحلیل در تنظیمات سرور غیرفعال است؛ درخواست‌ها محفوظ می‌مانند.</p>}
+            <details className="small muted" style={{ marginTop: 12 }}><summary>آخرین پردازش و خطای مدل</summary>
+              <p>آخرین پردازش: {aiStatus.last_processed_at ? fmtDateTime(aiStatus.last_processed_at) : "هنوز پردازشی ثبت نشده"}</p>
+              {aiStatus.last_error && <p role="status">آخرین خطا: {aiStatus.last_error}</p>}
+            </details>
+            {aiStatus.intake_count >= aiStatus.intake_capacity && <p role="status" className="small" style={{ color: "var(--warn)" }}>
+              ورودی خودکار به سقف ظرفیت رسیده است. هشدارهای بعدی ذخیره می‌شوند و برای تحلیل تکی یا انتخاب محدود تاریخچه در دسترس‌اند.
+            </p>}
+          </>}
+          {(aiError || actionError) && <div className="login-error" role="alert">{actionError || aiError}</div>}
         </div>
-        {aiStatus && <>
-          <div className="row wrap small" style={{ gap: 16, marginTop: 12 }}>
-            <span>در صف: {faNum(aiStatus.counts.PENDING)}</span>
-            <span>در حال پردازش: {faNum(aiStatus.counts.PROCESSING)}</span>
-            <span>موفق: {faNum(aiStatus.counts.COMPLETED)}</span>
-            <span>ناموفق: {faNum(aiStatus.counts.FAILED)}</span>
-            <span>خودکار متوقف: {faNum(aiStatus.paused_automatic ?? 0)}</span>
-            <span>بدون درخواست تحلیل: {faNum(aiStatus.unprocessed ?? 0)}</span>
-            <span>آخرین پردازش: {aiStatus.last_processed_at ? fmtDateTime(aiStatus.last_processed_at) : "هنوز پردازشی ثبت نشده"}</span>
-          </div>
-          <div className="small" style={{ marginTop: 8 }}>
-            مدل: <span className="technical">{aiStatus.model}</span> ·
-            {aiStatus.connection.ok ? " اتصال مدل برقرار است" : ` مدل در دسترس نیست (${aiStatus.connection.detail})`}
-            {!aiStatus.worker_enabled && " · worker تحلیل در تنظیمات سرور غیرفعال است؛ درخواست‌ها محفوظ می‌مانند."}
-          </div>
-          {aiStatus.last_error && <div className="small" role="status">آخرین خطا: {aiStatus.last_error}</div>}
-          {aiStatus.intake_count >= aiStatus.intake_capacity && <p role="status" className="small" style={{ color: "var(--warn)" }}>
-            ورودی خودکار به سقف ظرفیت رسیده است. هشدارهای بعدی ذخیره می‌شوند و برای تحلیل تکی یا انتخاب محدود تاریخچه در دسترس‌اند.
-          </p>}
-        </>}
-        {(aiError || actionError) && <div role="alert" style={{ color: "var(--danger)", marginTop: 8 }}>{actionError || aiError}</div>}
-      </div>
-      <div className="card card-pad" style={{ marginBottom: 14 }}>
+      </section>
+      <div className="card security-toolbar">
         <div className="row wrap" style={{ gap: 12 }}>
           <IconShield size={20} style={{ color: "var(--danger)" }} />
           <div>
@@ -339,7 +347,7 @@ export default function SecurityPage() {
               <EmptyState title="هشداری مطابق فیلتر نیست" hint="فیلتر تحلیل و جست‌وجو روی همین صفحه اعمال می‌شوند؛ صفحه‌بندی برای همهٔ هشدارها در دسترس است." />
             ) : (
               <div className="table-wrap">
-                <table className="data">
+                <table className="data security-table">
                   <thead>
                     <tr>
                       <th>شدت</th><th>امضا</th><th>منبع → مقصد</th><th>پروتکل</th><th>action</th>
@@ -348,14 +356,14 @@ export default function SecurityPage() {
                   </thead>
                   <tbody>
                     {filtered.map((a) => (
-                      <tr key={a.id} className="clickable" onClick={() => setDetail(a)}>
+                      <tr key={a.id} className="clickable" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) setDetail(a); }} onClick={() => setDetail(a)}>
                         <td>
                           <span className={`badge ${a.severity <= 1 ? "badge-danger" : a.severity === 2 ? "badge-warn" : "badge-muted"}`}>
                             {severityLabel(a.severity)}
                           </span>
                         </td>
                         <td className="small" style={{ maxWidth: 240 }}>{a.signature ?? "—"}</td>
-                        <td className="technical small">{a.src_ip ?? "?"}{a.src_port ? `:${a.src_port}` : ""} → {a.dest_ip ?? "?"}{a.dest_port ? `:${a.dest_port}` : ""}</td>
+                        <td><div className="event-path"><span className="event-endpoints"><bdi>{a.src_port != null && a.src_ip?.includes(":") ? `[${a.src_ip}]` : a.src_ip ?? "?"}{a.src_port != null ? `:${a.src_port}` : ""}</bdi><bdi>{a.dest_port != null && a.dest_ip?.includes(":") ? `[${a.dest_ip}]` : a.dest_ip ?? "?"}{a.dest_port != null ? `:${a.dest_port}` : ""}</bdi></span><span className="muted">↓</span></div></td>
                         <td className="small">{[a.proto, a.app_proto].filter(Boolean).join("/") || "—"}</td>
                         <td>
                           {a.action == null ? <span className="badge badge-muted">نامشخص</span>
@@ -372,7 +380,7 @@ export default function SecurityPage() {
                               if (state && state !== "FAILED" && !paused) setDetail(a);
                               else void analyze(a.id);
                             }}>
-                            {busy === a.id ? "…" : analyses.get(a.id)?.status === "FAILED" ? "تلاش دوباره" : "تحلیل با هوش مصنوعی"}
+                            {busy === a.id ? <><MiniSpinner />ثبت درخواست…</> : analyses.get(a.id)?.status === "FAILED" ? "تلاش دوباره" : "تحلیل با هوش مصنوعی"}
                           </button>
                         </td>
                         <td className="small muted" title={fmtDateTime(a.ts)}>{fmtAgo(a.ts)}</td>
@@ -391,11 +399,9 @@ export default function SecurityPage() {
       </div>
 
       {detail && (
-        <div className="modal-backdrop" onClick={() => setDetail(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 720 }}>
+        <Dialog title={`هشدار #${detail.id} — شواهد و تحلیل`} onClose={() => setDetail(null)} wide>
             <div className="row" style={{ marginBottom: 10, gap: 10 }}>
               <IconAlert size={18} style={{ color: "var(--danger)" }} />
-              <h3 style={{ fontSize: 15 }}>هشدار #{detail.id} — شواهد و تحلیل</h3>
               <div className="spacer" />
               <span className={`badge ${detail.severity <= 2 ? "badge-danger" : "badge-muted"}`}>{severityLabel(detail.severity)}</span>
             </div>
@@ -459,8 +465,7 @@ export default function SecurityPage() {
               <div className="spacer" />
               <button className="btn ghost" onClick={() => setDetail(null)}>بستن</button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       )}
     </div>
   );

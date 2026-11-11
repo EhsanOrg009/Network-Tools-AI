@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { EnrollmentRequest } from "../lib/types";
 import { faNum, fmtDateTime, fmtAgo } from "../lib/format";
-import { Card, EmptyState, ErrorState, SkeletonRows, StatusPill, TechChip } from "../components/ui";
+import { Card, Dialog, EmptyState, ErrorState, SkeletonRows, StatCard, StatusPill, TechChip } from "../components/ui";
 import { useToast } from "../components/toast";
 import { IconAlert, IconCheck, IconX } from "../components/icons";
 
@@ -67,6 +67,10 @@ export default function PendingAgentsPage() {
 
   return (
     <div>
+      {items && <div className="grid-half" style={{ marginBottom: 22 }}>
+        <StatCard label="در انتظار تصمیم شما" value={faNum(items.length)} hint="اطلاعات دستگاه پیش از تأیید اعلامی است" icon={<IconAlert size={18} />} color="var(--warn)" />
+        <StatCard label="تصمیم‌های اخیر" value={faNum(history?.length ?? 0)} hint="از آخرین ۵۰ درخواست ثبت‌نام" icon={<IconCheck size={18} />} />
+      </div>}
       <div className="card card-pad" style={{ marginBottom: 14 }}>
         <div className="row" style={{ gap: 12 }}>
           <IconAlert size={20} style={{ color: "var(--warn)" }} />
@@ -157,8 +161,7 @@ export default function PendingAgentsPage() {
 
       {/* detail drawer */}
       {detail && (
-        <div className="modal-backdrop" onClick={() => setDetail(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <Dialog title="جزئیات درخواست ثبت‌نام" onClose={() => setDetail(null)}>
             <div className="row" style={{ marginBottom: 10 }}>
               <h3 style={{ fontSize: 15 }}>جزئیات درخواست (اطلاعات اعلامی عامل)</h3>
               <div className="spacer" />
@@ -175,18 +178,12 @@ export default function PendingAgentsPage() {
               <div className="spacer" />
               <button className="btn ghost" onClick={() => setDetail(null)}>بستن</button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       )}
 
       {/* confirm approve/reject */}
-      <div className="modal-backdrop" style={{ display: confirm ? "grid" : "none" }} onClick={() => setConfirm(null)}>
-        <div className="modal" onClick={(e) => e.stopPropagation()} hidden={!confirm}>
-          {confirm && (
+      {confirm && <Dialog title={confirm.reject ? "رد درخواست ثبت‌نام" : "تأیید درخواست ثبت‌نام"} onClose={() => setConfirm(null)} busy={busy}>
             <>
-              <h3 style={{ fontSize: 15, marginBottom: 10 }}>
-                {confirm.reject ? "رد درخواست ثبت‌نام" : "تأیید درخواست ثبت‌نام"}
-              </h3>
               <div className="small" style={{ color: "var(--text-2)", lineHeight: 1.9 }}>
                 {confirm.reject ? (
                   <>
@@ -223,12 +220,10 @@ export default function PendingAgentsPage() {
                 >
                   {busy ? "در حال انجام…" : confirm.reject ? "رد نهایی" : "تأیید نهایی"}
                 </button>
-                <button className="btn ghost" onClick={() => setConfirm(null)}>انصراف</button>
+                <button className="btn ghost" disabled={busy} onClick={() => setConfirm(null)}>انصراف</button>
               </div>
             </>
-          )}
-        </div>
-      </div>
+      </Dialog>}
 
       <div className="small muted section-gap">
         درخواست‌های منقضی‌شده به‌صورت خودکار بسته می‌شوند؛ دستگاه می‌تواند بعد دوباره معرفی شود

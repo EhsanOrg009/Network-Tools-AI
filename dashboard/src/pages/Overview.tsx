@@ -5,7 +5,7 @@ import type { Overview, EnrollmentRequest } from "../lib/types";
 import { faNum, fmtAgo, fmtDateTime } from "../lib/format";
 import { StatCard, Card, EmptyState, ErrorState, Skeleton, StatusPill } from "../components/ui";
 import { BarList, CHART_COLORS, Donut, TrendChart } from "../components/charts";
-import { IconAgents, IconGauge, IconShield, IconWifi, IconInbox, IconTerminal, IconHeartbeat } from "../components/icons";
+import { IconAgents, IconGauge, IconShield, IconWifi, IconInbox, IconTerminal, IconHeartbeat, IconChevron } from "../components/icons";
 import { severityLabel } from "../lib/format";
 import { CommandCenter } from "../components/CommandCenter";
 
@@ -54,7 +54,7 @@ export default function OverviewPage() {
   const { agents } = data;
   const sevColors: Record<number, string> = { 1: CHART_COLORS.danger, 2: CHART_COLORS.warn, 3: CHART_COLORS.accent2, 4: CHART_COLORS.sev4 };
   const health =
-    agents.active > 0 && agents.revoked === 0
+    agents.active > 0 && agents.stale === 0
       ? "پایدار"
       : agents.active > 0
         ? "نیازمند توجه"
@@ -62,6 +62,11 @@ export default function OverviewPage() {
 
   return (
     <div>
+      {error && <div className="card" role="alert" style={{ marginBottom: 18 }}><ErrorState message={error} onRetry={() => setRefresh((k) => k + 1)} /></div>}
+      <div className="row wrap" style={{ justifyContent: "space-between", marginBottom: 18 }}>
+        <span className="small muted">آخرین همگام‌سازی: {fmtDateTime(data.generated_at)}</span>
+        <button className="btn sm" disabled={loading} onClick={() => setRefresh((k) => k + 1)}>{loading ? "در حال همگام‌سازی…" : "↻ به‌روزرسانی"}</button>
+      </div>
       <div className="stats-grid">
         <StatCard label="عامل‌های فعال (آنلاین)" value={faNum(agents.active)}
           hint={`از مجموع ${faNum(agents.total)} عامل ثبت‌شده${agents.revoked ? ` — ${faNum(agents.revoked)} باطل‌شده` : ""}`}
@@ -84,15 +89,12 @@ export default function OverviewPage() {
           icon={<IconTerminal size={19} />} color={CHART_COLORS.accent} />
       </div>
 
-      <div className="section-gap" style={{ marginBottom: 14 }}>
-        <CommandCenter />
-      </div>
-
-      <div className="grid-2">
+      <div className="overview-primary">
         <Card
-          title={<><IconGauge size={16} /> روند ۷ روزه‌ی رخدادها، هشدارها و عملیات مدیر</>}
-          extra={<span className="small muted">منبع: پایگاه‌داده‌ی هسته</span>}
+          title={<><IconGauge size={16} /> جریان فعالیت شبکه</>}
+          extra={<span className="badge badge-muted">۷ روز اخیر</span>}
         >
+          <div className="trend-headline"><strong>{faNum(data.events.last_24h)}</strong><span className="small muted">رویداد در ۲۴ ساعت اخیر</span></div>
           <TrendChart
             data={data.trend_7d}
             series={[
@@ -106,17 +108,25 @@ export default function OverviewPage() {
           <span className={`badge ${health === "پایدار" ? "badge-ok" : health === "بدون عامل فعال" ? "badge-muted" : "badge-warn"}`}>{health}</span>
         }>
           <Donut
-            centerValue={faNum(agents.total - agents.revoked)}
-            centerLabel="عامل بدون احتساب باطل‌شده"
+            centerValue={faNum(agents.total)}
+            centerLabel="عامل ثبت‌شده"
             slices={[
               { label: "آنلاین", value: agents.active, color: CHART_COLORS.ok },
               { label: "بدون ضربان", value: agents.stale, color: CHART_COLORS.warn },
               { label: "باطل‌شده", value: agents.revoked, color: CHART_COLORS.muted },
-              { label: "در انتظار تأیید", value: agents.pending_approval, color: CHART_COLORS.accent },
             ]}
           />
+          <div className="divider" />
+          <Link className="queue-link" to="/dashboard/pending"><span className="queue-icon"><IconInbox size={16} /></span>
+            <span><strong>در انتظار تصمیم شما</strong><small>درخواست‌های ورود دستگاه</small></span>
+            <span className="badge badge-warn">{faNum(agents.pending_approval)}</span><IconChevron size={14} /></Link>
+          <Link className="queue-link" to="/dashboard/agents"><span className="queue-icon"><IconHeartbeat size={16} /></span>
+            <span><strong>بررسی ارتباط عامل‌ها</strong><small>دستگاه‌های بدون ضربان تازه</small></span>
+            <span className="badge badge-muted">{faNum(agents.stale)}</span><IconChevron size={14} /></Link>
         </Card>
       </div>
+
+      <div className="section-gap"><CommandCenter /></div>
 
       <div className="grid-half section-gap">
         <Card title="تفکیک شدت هشدارهای امنیتی">
@@ -134,19 +144,17 @@ export default function OverviewPage() {
         </Card>
 
         <Card title="آخرین عملیات ثبت‌شده (حسابرسی)" extra={
-          <Link to="/dashboard/settings" className="small">/rss</Link>
+          <Link to="/dashboard/settings#audit-records" className="small">مشاهدهٔ حسابرسی</Link>
         }>
           {data.recent_audit.length === 0 ? (
             <EmptyState title="فعالیتی ثبت نشده" hint="پس از کنش‌های مدیر و عامل‌ها اینجا دیده می‌شود." />
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+            <div className="audit-timeline">
               {data.recent_audit.slice(0, 8).map((a, i) => (
-                <div key={i} className="row" style={{ gap: 10, fontSize: 12.5 }}>
-                  <span className="code-chip" style={{ fontSize: 11 }}>{a.action}</span>
-                  <span className="muted small">{a.actor}</span>
-                  <span className="small muted technical">{a.target ?? ""}</span>
-                  <span className="spacer" />
-                  <span className="small muted">{fmtAgo(a.at)}</span>
+                <div key={i} className="audit-event">
+                  <span className="audit-dot" /><div className="audit-copy"><span className="code-chip">{a.action}</span>
+                  <div className="small muted">{a.actor} · <bdi className="technical">{a.target ?? ""}</bdi></div></div>
+                  <time title={fmtDateTime(a.at)}>{fmtAgo(a.at)}</time>
                 </div>
               ))}
             </div>

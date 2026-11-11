@@ -88,3 +88,9 @@ export const IconBook = (p: P) => (
 export const IconHeartbeat = (p: P) => (
   <Svg {...p}><path d="M3 12h4l2.5-6 4 12L16 12h5" /></Svg>
 );
+export const IconMenu = (p: P) => (
+  <Svg {...p}><path d="M4 6h16M4 12h16M4 18h16" /></Svg>
+);
+export const IconChevron = (p: P) => (
+  <Svg {...p}><path d="m14 6-6 6 6 6" /></Svg>
+);

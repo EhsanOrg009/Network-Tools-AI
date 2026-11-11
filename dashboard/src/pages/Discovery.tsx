@@ -97,8 +97,6 @@ export default function DiscoveryPage() {
 
   /** Hosts per subnet via real CIDR containment (IPv4 + IPv6). */
   const topology = useMemo(() => {
-    const agentIps = new Set<string>();
-    for (const a of agents ?? []) for (const ip of a.claimed_ips ?? []) agentIps.add(ip);
     return observedSubnets.slice(0, 6).map((subnet) => {
       const inside = filteredHosts.filter((h) => ipInCidr(h.ip, subnet.cidr));
       return { subnet, hosts: inside.slice(0, 8), extra: Math.max(0, inside.length - 8) };
@@ -223,7 +221,7 @@ export default function DiscoveryPage() {
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
                         {hs.map((h) => {
-                          const isAgent = (agents ?? []).some((a) => (a.claimed_ips ?? []).includes(h.ip));
+                          const isAgent = (agents ?? []).some((a) => a.status === "active" && (a.claimed_ips ?? []).includes(h.ip));
                           return (
                             <span key={h.ip} className={`badge ${isAgent ? "badge-ok" : "badge-muted"}`} title={h.hostname ?? ""}>
                               {isAgent && <span className="dot pulse" />}
@@ -257,7 +255,7 @@ export default function DiscoveryPage() {
                   </thead>
                   <tbody>
                     {filteredHosts.slice(0, 100).map((h) => {
-                      const isAgent = (agents ?? []).some((a) => (a.claimed_ips ?? []).includes(h.ip));
+                      const isAgent = (agents ?? []).some((a) => a.status === "active" && (a.claimed_ips ?? []).includes(h.ip));
                       return (
                         <tr key={h.ip}>
                           <td><TechChip>{h.ip}</TechChip></td>

@@ -4,6 +4,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useState } from "react";
 import { faNum, fmtDayShort } from "../lib/format";
 
 export const CHART_COLORS = {
@@ -40,7 +41,7 @@ export function BarList({ items, color = CHART_COLORS.accent, formatValue = faNu
           <div style={{ height: 8, borderRadius: 6, background: "var(--muted-soft)", overflow: "hidden" }}>
             <div style={{
               height: "100%", borderRadius: 6,
-              width: `${Math.max(2, (it.value / max) * 100)}%`,
+              width: `${(it.value / max) * 100}%`,
               background: it.color || color,
               transition: "width 0.5s ease",
             }} />
@@ -51,68 +52,61 @@ export function BarList({ items, color = CHART_COLORS.accent, formatValue = faNu
   );
 }
 
-/** Column/pair trend chart (7-day activity): grouped bars + hairline grid. */
+/** Interactive chronological trend: straight lines retain actual measured values. */
 export function TrendChart({ data, series }: {
   data: { date: string; [k: string]: number | string }[];
   series: { key: string; label: string; color: string }[];
 }) {
-  if (!data.length) return null;
-  const W = 640, H = 190, PadX = 26, PadTop = 14, PadBottom = 26;
-  const innerW = W - PadX * 2, innerH = H - PadTop - PadBottom;
-  const max = Math.max(1, ...data.flatMap((d) => series.map((s) => Number(d[s.key]) || 0)));
-  const ticks = [0, 0.5, 1].map((t) => max * t);
-  const groupW = innerW / data.length;
-  const barW = Math.min(14, (groupW - 8) / series.length);
-
-  const y = (v: number) => PadTop + innerH - (v / max) * innerH;
-  const groupX = (i: number) => PadX + i * groupW + groupW / 2;
-
-  return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", direction: "ltr" }}>
-        {ticks.map((t, i) => (
-          <g key={i}>
-            <line x1={PadX} x2={W - PadX} y1={y(t)} y2={y(t)} stroke="var(--grid-line)" strokeWidth={1} />
-            <text x={W - PadX + 4} y={y(t) + 3} fontSize={9} fill="var(--text-3)" textAnchor="start">
-              {faNum(t)}
-            </text>
-          </g>
-        ))}
-        {data.map((d, i) => (
-          <g key={i}>
-            {series.map((s, si) => {
-              const v = Number(d[s.key]) || 0;
-              const h = v > 0 ? Math.max(2, (v / max) * innerH) : 0;
-              const x = groupX(i) - (series.length * barW) / 2 + si * barW;
-              return h ? (
-                <rect
-                  key={s.key}
-                  x={x}
-                  y={y(v)}
-                  width={barW - 2} height={h} rx={2.5}
-                  fill={s.color}
-                  opacity={0.9}
-                >
-                  <title>{`${s.label}: ${faNum(v)}`}</title>
-                </rect>
-              ) : null;
-            })}
-            <text x={groupX(i)} y={H - 8} fontSize={9.5} fill="var(--text-3)" textAnchor="middle">
-              {fmtDayShort(String(d.date))}
-            </text>
-          </g>
-        ))}
-      </svg>
-      <div className="chart-legend" style={{ marginTop: 6 }}>
-        {series.map((s) => (
-          <span key={s.key} className="key">
-            <span className="swatch" style={{ background: s.color }} />
-            {s.label}
-          </span>
-        ))}
-      </div>
+  const [hidden, setHidden] = useState<string[]>([]);
+  const [selected, setSelected] = useState<number | null>(null);
+  if (!data.length) return <div className="state-block small">داده‌ای برای نمودار موجود نیست</div>;
+  const W = 680, H = 224, left = 18, right = 54, top = 18, bottom = 38;
+  const innerW = W - left - right, innerH = H - top - bottom;
+  const visible = series.filter((s) => !hidden.includes(s.key));
+  const rawMax = Math.max(1, ...data.flatMap((d) => visible.map((s) => Number(d[s.key]))));
+  const magnitude = 10 ** Math.floor(Math.log10(rawMax));
+  const step = Math.max(1, Math.ceil(rawMax / magnitude / 4) * magnitude);
+  const max = Math.ceil(rawMax / step) * step;
+  const x = (i: number) => left + innerW * i / Math.max(1, data.length - 1);
+  const y = (v: number) => top + innerH - v / max * innerH;
+  const index = selected ?? data.length - 1;
+  const focus = data[index];
+  return <div>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", direction: "ltr", display: "block" }}
+      role="img" aria-label="روند روزانهٔ رویدادها، هشدارها و عملیات مدیر">
+      {[0, 1, 2, 3, 4].map((i) => {
+        const value = max * i / 4;
+        return <g key={i}><line x1={left} x2={W - right} y1={y(value)} y2={y(value)} stroke="var(--grid-line)" strokeDasharray="3 5" />
+          <text x={W - right + 10} y={y(value) + 4} fill="var(--text-3)" fontSize="10">{faNum(Math.round(value))}</text></g>;
+      })}
+      {visible.map((s) => {
+        const path = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(Number(d[s.key]))}`).join(" ");
+        return <g key={s.key}>
+          <path d={`${path} L ${x(data.length - 1)} ${y(0)} L ${x(0)} ${y(0)} Z`} fill={s.color} fillOpacity="0.05" />
+          <path d={path} fill="none" stroke={s.color} strokeWidth="2.3" strokeLinejoin="round" />
+          <circle cx={x(index)} cy={y(Number(focus[s.key]))} r="4" fill="var(--bg-card)" stroke={s.color} strokeWidth="2" />
+        </g>;
+      })}
+      {data.map((d, i) => <g key={d.date} tabIndex={0} role="button" aria-label={`${fmtDayShort(String(d.date))}: ${series.map((s) => s.label + " " + faNum(Number(d[s.key]))).join("، ")}`}
+        onFocus={() => setSelected(i)} onMouseEnter={() => setSelected(i)} onClick={() => setSelected(i)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowRight") setSelected(Math.min(data.length - 1, index + 1));
+          if (e.key === "ArrowLeft") setSelected(Math.max(0, index - 1));
+        }}>
+        <rect x={x(i) - innerW / Math.max(2, data.length) / 2} y={top} width={innerW / Math.max(1, data.length)} height={innerH} fill="transparent" />
+        <text x={x(i)} y={H - 12} textAnchor="middle" fontSize="10" fill={i === index ? "var(--text-1)" : "var(--text-3)"}>{fmtDayShort(String(d.date))}</text>
+      </g>)}
+    </svg>
+    <div className="chart-legend" style={{ marginTop: 12, alignItems: "center" }}>
+      <span className="small muted">{fmtDayShort(String(focus.date))}</span>
+      {series.map((s) => <button type="button" key={s.key} className="btn ghost sm"
+        aria-pressed={!hidden.includes(s.key)} title="نمایش یا پنهان‌کردن این سری"
+        style={{ opacity: hidden.includes(s.key) ? 0.5 : 1 }}
+        onClick={() => setHidden((h) => h.includes(s.key) ? h.filter((k) => k !== s.key) : [...h, s.key])}>
+        <span className="swatch" style={{ background: s.color }} />{s.label}<b>{faNum(Number(focus[s.key]))}</b>
+      </button>)}
     </div>
-  );
+  </div>;
 }
 
 /** Donut breakdown for agent states / anything small. */
@@ -127,7 +121,7 @@ export function Donut({ slices, centerLabel, centerValue }: {
   const angle = (v: number) => C * (v / Math.max(total, 1));
   return (
     <div className="row wrap" style={{ gap: 22, justifyContent: "center" }}>
-      <svg viewBox="0 0 140 140" width={140} height={140}>
+      <div style={{ textAlign: "center" }}><svg viewBox="0 0 140 140" width={148} height={148} role="img" aria-label="تفکیک وضعیت عامل‌های ثبت‌شده">
         <circle cx="70" cy="70" r={R} fill="none" stroke="var(--muted-soft)" strokeWidth={15} />
         {total > 0 && slices.map((s, i) => {
           const a = angle(s.value);
@@ -145,14 +139,12 @@ export function Donut({ slices, centerLabel, centerValue }: {
           offset += a;
           return el;
         })}
-        <text x="70" y="66" textAnchor="middle" fontSize={22} fontWeight={800} fill="var(--text-1)">
+        <text x="70" y="79" textAnchor="middle" fontSize={28} fontWeight={600} fill="var(--text-1)">
           {centerValue}
         </text>
-        <text x="70" y="86" textAnchor="middle" fontSize={10} fill="var(--text-3)">
-          {centerLabel}
-        </text>
-      </svg>
-      <div className="chart-legend" style={{ flexDirection: "column", gap: 8 }}>
+
+      </svg><div className="small muted" style={{ maxWidth: 180 }}>{centerLabel}</div></div>
+      <div className="chart-legend" style={{ flexDirection: "column", gap: 12 }}>
         {slices.map((s) => (
           <span key={s.label} className="key">
             <span className="swatch" style={{ background: s.color }} />

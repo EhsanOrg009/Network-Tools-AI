@@ -1,6 +1,8 @@
 import type { ReactNode, ReactElement } from "react";
+import { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import { stateLabel, faNum } from "../lib/format";
-import { IconAlert, IconSearch, IconOff, IconRefresh } from "./icons";
+import { IconAlert, IconSearch, IconOff, IconRefresh, IconX } from "./icons";
 
 /** Status pill with standard NOC color semantics. */
 export function StatusPill({ state, pulse }: { state: string | null | undefined; pulse?: boolean }) {
@@ -23,14 +25,12 @@ export function StatCard({ label, value, hint, icon, color = "var(--accent)" }: 
 }) {
   return (
     <div className="card stat-card" style={{ ["--stat-color" as string]: color }}>
-      <div className="row">
-        {icon && <div className="stat-icon">{icon}</div>}
-        <div className="stat-value">{value}</div>
-      </div>
-      <div>
+      <div className="stat-top">
         <div className="stat-label">{label}</div>
-        {hint && <div className="stat-hint">{hint}</div>}
+        {icon && <div className="stat-icon">{icon}</div>}
       </div>
+      <div className="stat-value">{value}</div>
+      {hint && <div className="stat-hint">{hint}</div>}
     </div>
   );
 }
@@ -46,10 +46,9 @@ export function Card({ title, extra, children, pad = true, className, style }: {
   return (
     <div className={`card${pad ? " card-pad" : ""}${className ? ` ${className}` : ""}`} style={style}>
       {(title || extra) && (
-        <div className="row" style={{ marginBottom: 14, gap: 10 }}>
-          <h3 className="card-title" style={{ margin: 0 }}>{title}</h3>
-          <div className="spacer" />
-          {extra}
+        <div className="card-header">
+          <h3 className="card-title">{title}</h3>
+          {extra && <div className="card-header-actions">{extra}</div>}
         </div>
       )}
       {children}
@@ -132,6 +131,30 @@ export function MiniSpinner() {
 
 /* ---- modal ------------------------------------------------------------- */
 
+export function Dialog({ title, children, onClose, wide = false, busy = false }: {
+  title: string; children: ReactNode; onClose: () => void; wide?: boolean; busy?: boolean;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const id = useId();
+  useEffect(() => {
+    const dialog = ref.current!;
+    dialog.showModal();
+    return () => { dialog.close(); };
+  }, []);
+  return createPortal(
+    <dialog ref={ref} className={`modal${wide ? " wide" : ""}`} aria-labelledby={id}
+      onCancel={(e) => { e.preventDefault(); if (!busy) onClose(); }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget || busy) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) onClose();
+      }}>
+      <div className="modal-heading"><h2 id={id}>{title}</h2><button className="btn ghost icon-btn" aria-label="بستن پنجره" disabled={busy} onClick={onClose}><IconX size={17} /></button></div>
+      {children}
+    </dialog>, document.body,
+  );
+}
+
 export function ConfirmDialog({ open, title, message, confirmLabel = "مطمئنم، ادامه", danger, busy, onConfirm, onCancel }: {
   open: boolean;
   title: string;
@@ -144,19 +167,16 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "مطمئن
 }) {
   if (!open) return null;
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ fontSize: 15, marginBottom: 10 }}>{title}</h3>
+    <Dialog title={title} onClose={onCancel} busy={busy}>
         <div className="small" style={{ color: "var(--text-2)", lineHeight: 1.9 }}>{message}</div>
         <div className="row" style={{ marginTop: 20, justifyContent: "flex-start", gap: 8 }}>
           <button className={`btn ${danger ? "danger" : "primary"}`} disabled={busy} onClick={onConfirm}>
             {busy ? <MiniSpinner /> : null}
             {confirmLabel}
           </button>
-          <button className="btn ghost" onClick={onCancel}>انصراف</button>
+          <button className="btn ghost" disabled={busy} onClick={onCancel}>انصراف</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

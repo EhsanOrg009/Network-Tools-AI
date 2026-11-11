@@ -132,6 +132,20 @@ describe("DiscoveryPage", () => {
     await waitFor(() => expect(screen.getByText(/فاقد observations/)).toBeInTheDocument());
   });
 
+  it.each(["stale", "revoked"])("does not mark a %s agent as an online topology endpoint", async (status) => {
+    mockedApi.get.mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/admin/v1/networks")) return makeNetworksResponse({
+        observations: [{ agent_id: "agt_1", interface: "eth0", cidr: "192.0.2.0/24", connected: 1, classification: "physical" }],
+      });
+      if (path.startsWith("/api/hosts")) return { items: [{ ip: "192.0.2.42", hostname: "test-host" }] };
+      if (path.startsWith("/api/admin/v1/agents")) return { items: [{ id: "agt_1", status, claimed_ips: ["192.0.2.42"] }] };
+      throw new Error(`unexpected path ${path}`);
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getAllByText("192.0.2.42").length).toBeGreaterThan(0));
+    expect(document.querySelector(".badge-ok .pulse")).toBeNull();
+  });
+
   it("renders hosts inside a subnet in the topology via real CIDR matching (scenarios 6-8)", async () => {
     mockedApi.get.mockImplementation(async (path: string) => {
       if (path.startsWith("/api/admin/v1/networks")) {

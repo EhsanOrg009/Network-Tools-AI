@@ -98,3 +98,22 @@ def test_nonstream_response_requires_completion_signal(settings):
 def test_complete_analysis_parser_does_not_repair_partial_object():
     assert LLMClient.extract_complete_json('{"summary":"partial"') is None
     assert LLMClient.extract_complete_json('```json\n{"summary":"complete"}\n```') == {'summary': 'complete'}
+
+
+def test_transport_timeout_midstream_closes_and_cools_down(settings):
+    client = LLMClient(settings)
+    class Stream:
+        closed = False
+        def __iter__(self):
+            yield SimpleNamespace(choices=[])
+            raise httpx.ReadTimeout('stalled generation')
+        def close(self): self.closed = True
+    stream = Stream()
+    create = Mock(return_value=stream)
+    client._client.chat.completions.create = create
+    with pytest.raises(LLMTimeout):
+        client.chat_stream([])
+    assert stream.closed
+    with pytest.raises(LLMBusy):
+        client.chat_stream([])
+    assert create.call_count == 1

@@ -312,8 +312,10 @@ class LLMClient:
                         first_token_logged = True
                         first_token_cb()
                     parts.append(content)
-        except APITimeoutError as exc:
-            raise LLMTimeout("LLM stream failed: APITimeoutError") from exc
+        except (APITimeoutError, httpx.TimeoutException) as exc:
+            # The SDK wraps errors opening a stream, but HTTPX can raise
+            # directly while consuming it. Apply the same retry quarantine.
+            raise LLMTimeout(f"LLM stream failed: {type(exc).__name__}") from exc
         except APIConnectionError as exc:
             raise LLMUnavailable(f"LLM stream failed: {exc.__class__.__name__}") from exc
         finally:

@@ -2426,6 +2426,10 @@ class Database:
                     and r["_signature_id"] == lead["_signature_id"]
                     and r["_severity"] == lead["_severity"]
                     and r["origin"] != "manual" and lead["origin"] != "manual"
+                    # Persisted failures (including truncation/timeouts) retry
+                    # individually, also after restart, instead of repeating
+                    # the same oversized generation until its budget expires.
+                    and r["provider_failures"] == 0 and lead["provider_failures"] == 0
                 ][: max(0, max_batch - 1)]
                 chosen = [lead, *peers]
                 now_iso = _now_iso()

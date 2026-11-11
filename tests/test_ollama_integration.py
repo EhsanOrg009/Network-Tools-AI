@@ -114,3 +114,34 @@ def test_real_offline_endpoint_is_unavailable():
     c = LLMClient(s)
     with pytest.raises(LLMUnavailable):
         c.chat([{"role": "user", "content": "سلام"}])
+
+
+@requires_ollama
+@requires_ollama_opt_in
+def test_real_manual_security_analysis_persists_only_selected_event(db, settings):
+    from netagent.services.ai_analysis import AlertAnalysisWorker
+    from tests.test_security_ai_controls import ingest, request
+
+    # Only fixture data enters this live test; the operator's database and
+    # enrollment credentials are never read or sent to the model.
+    settings.llm_base_url = OLLAMA_URL
+    settings.llm_model = "gemma-4-e4b:latest"
+    settings.llm_timeout_seconds = 600
+    settings.llm_max_output_tokens = 4096
+    settings.ai_analysis_batch_size = 3
+    first, other = ingest(db, 1), ingest(db, 2)
+    job = request(db, first)
+    client = LLMClient(settings)
+    try:
+        worker = AlertAnalysisWorker(db, settings, client)
+        assert worker.process_one()
+        row = db.get_alert_analysis(first)
+        assert row["status"] == "COMPLETED", row.get("error")
+        assert row["job_id"] == job["job_id"] and row["summary"]
+        assert client.last_finish_reason == "stop"
+        assert db.get_alert_analysis(other) is None
+        assert not db.security_ai_auto_enabled()
+        assert request(db, first)["job_id"] == job["job_id"]
+        assert not worker.process_one()
+    finally:
+        client._client.close()

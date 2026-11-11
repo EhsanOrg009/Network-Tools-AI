@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from netagent.agent.llm_client import LLMBusy, LLMUnavailable
+from netagent.agent.llm_client import LLMBusy, LLMUnavailable, LLMTruncated
 from netagent.collectors.suricata import parse_eve_line, store_event
 from netagent.database import AnalysisQueueFull, Database
 from netagent.services.ai_analysis import AlertAnalysisWorker
@@ -100,6 +100,30 @@ def test_manual_is_single_even_when_batch_enabled(db, settings):
     assert all(db.get_alert_analysis(aid) is None for aid in ids[1:])
     assert request(db, ids[0])["job_id"] == first["job_id"]
     assert not worker.process_one()
+
+
+def test_truncated_batch_recovers_individually_after_restart(db, settings):
+    db.set_security_ai_auto(True, actor="admin")
+    ids = [ingest(db, n) for n in (1, 2)]
+    settings.ai_analysis_batch_size = 3
+    class Truncated(FakeLLM):
+        def chat(self, *args, **kwargs):
+            raise LLMTruncated("context exhausted")
+    worker = AlertAnalysisWorker(db, settings, Truncated())
+    assert worker.process_one()
+    assert all(db.get_alert_analysis(aid)["provider_failures"] == 1 for aid in ids)
+    with db.transaction():
+        db._conn.execute("UPDATE alert_analyses SET next_retry_epoch=0")
+    reopened = Database(db.path)
+    try:
+        resumed = AlertAnalysisWorker(reopened, settings, FakeLLM())
+        assert resumed.process_one()
+        statuses = [reopened.get_alert_analysis(aid)["status"] for aid in ids]
+        assert sorted(statuses) == ["COMPLETED", "PENDING"]
+        assert resumed.process_one()
+        assert all(reopened.get_alert_analysis(aid)["status"] == "COMPLETED" for aid in ids)
+    finally:
+        reopened.close()
 
 
 def test_concurrent_clicks_create_one_job_and_one_audit(db):

@@ -138,20 +138,22 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        jobs.start()
-        if start_monitor:
-            monitor.start()
-        if ai_worker is not None:
-            ai_worker.start()
         try:
+            jobs.start()
+            if start_monitor:
+                monitor.start()
+            if ai_worker is not None:
+                ai_worker.start()
             yield
         finally:
             jobs_stopped = jobs.shutdown()
             ai_stopped = True
             if ai_worker is not None:
                 ai_stopped = ai_worker.stop()
-            monitor.stop()
-            if jobs_stopped and ai_stopped:
+            monitor_stopped = monitor.stop()
+            if jobs_stopped and ai_stopped and monitor_stopped:
+                if llm is not None:
+                    llm.close()
                 db.close()
 
     app = FastAPI(

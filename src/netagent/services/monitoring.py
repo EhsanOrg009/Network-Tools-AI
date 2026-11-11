@@ -132,12 +132,16 @@ class Monitor:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                log.warning("monitor still ingesting; retaining tailer and database until it stops")
+                return False
         self._thread = None
         self.tailer.close()
+        return True
 
     # -- health snapshot ---------------------------------------------------------
 

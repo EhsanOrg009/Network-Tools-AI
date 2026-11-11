@@ -176,6 +176,9 @@ class LLMClient:
     def settings(self) -> Settings:
         return self._settings
 
+    def close(self) -> None:
+        self._client.close()
+
     @_serialized
     def chat(
         self,

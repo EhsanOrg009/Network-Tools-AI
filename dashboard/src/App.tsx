@@ -1,6 +1,6 @@
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
-import { useMemo } from "react";
-import { api, hasToken, setToken } from "./lib/api";
+import { useMemo, useSyncExternalStore } from "react";
+import { api, hasToken, setToken, subscribeAuth } from "./lib/api";
 import { ThemeProvider, useTheme } from "./lib/theme";
 import { useLiveFeed } from "./lib/live";
 import {
@@ -128,7 +128,8 @@ function AppBar() {
 }
 
 function ShellInner() {
-  if (!hasToken()) {
+  const authenticated = useSyncExternalStore(subscribeAuth, hasToken);
+  if (!authenticated) {
     return (
       <div style={{ display: "grid", placeItems: "center", minHeight: "100vh", padding: 20 }}>
         <TokenGate />

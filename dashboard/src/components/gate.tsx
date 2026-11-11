@@ -2,7 +2,7 @@
  *  It lives only in the browser's localStorage and is sent as Bearer. */
 
 import { useState } from "react";
-import { api, setToken, hasToken } from "../lib/api";
+import { api, setToken } from "../lib/api";
 import { IconShield, IconOff } from "./icons";
 
 export function TokenGate() {
@@ -10,24 +10,20 @@ export function TokenGate() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // unused import guard
-  void hasToken;
-
   async function submit() {
+    if (busy || !value.trim()) return;
     setBusy(true);
     setError(null);
     const candidate = value.trim();
-    setToken(candidate);
     try {
-      await api.get("/api/dashboard/v1/healthz");
-      window.location.reload();
+      await api.get("/api/dashboard/v1/healthz", { token: candidate });
+      setToken(candidate);
     } catch (e) {
       setToken("");
       setError(
         (e instanceof Error && e.message) || "توکن پذیرفته نشد.",
       );
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   }
 
   return (

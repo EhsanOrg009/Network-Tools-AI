@@ -46,6 +46,7 @@ const importanceBadge: Record<string, string> = {
 const likelihoodFa: Record<string, string> = {
   low: "کم", medium: "متوسط", high: "زیاد", unknown: "نامشخص",
 };
+const analysisStatusFa = { PENDING: "در صف", PROCESSING: "در حال پردازش", COMPLETED: "تکمیل‌شده", FAILED: "ناموفق" };
 
 function AnalysisCell({ analysis, onOpen, unavailable }: { analysis?: AlertAnalysisRow; onOpen: () => void; unavailable: boolean }) {
   if (unavailable) return <span className="small muted">وضعیت تحلیل نامشخص</span>;
@@ -53,6 +54,7 @@ function AnalysisCell({ analysis, onOpen, unavailable }: { analysis?: AlertAnaly
   if (analysis.status === "COMPLETED") {
     return (
       <button className="btn ghost analysis-cell" onClick={onOpen} title="نمایش تحلیل کامل">
+        <span className="badge badge-ok">تکمیل‌شده</span>
         <span className={`badge ${importanceBadge[analysis.importance ?? "low"] ?? "badge-muted"}`}>
           {analysis.importance === "high" ? "مهم" : analysis.importance === "medium" ? "متوسط" : "کم"}
         </span>
@@ -344,7 +346,7 @@ export default function SecurityPage() {
                 <div className="row" style={{ gap: 8, marginBottom: 8 }}>
                   <b>تحلیل هوش مصنوعی</b>
                   <span className={`badge ${detailAnalysis.status === "COMPLETED" ? "badge-ok" : detailAnalysis.status === "FAILED" ? "badge-danger" : "badge-muted"}`}>
-                    {detailAnalysis.status}
+                    {analysisStatusFa[detailAnalysis.status]}
                   </span>
                   {detailAnalysis.model && <span className="small muted">{detailAnalysis.model}</span>}
                   <div className="spacer" />

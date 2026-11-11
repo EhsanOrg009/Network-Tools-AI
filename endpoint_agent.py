@@ -838,9 +838,21 @@ _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,253}[A-Za-z0-9])?$")
 
 def _validated_host(value) -> str:
     host = str(value or "").strip().rstrip(".")
-    if not host or len(host) > 253 or " " in host or host.startswith("-"):
+    if not host or len(host) > 253 or any(c.isspace() for c in host) or host.startswith("-"):
         raise ValueError("invalid host")
-    if not _HOSTNAME_RE.match(host):
+    literal, separator, zone = host.partition("%")
+    try:
+        address = ipaddress.ip_address(literal)
+    except ValueError:
+        address = None
+    if separator and (address is None or address.version != 6 or not address.is_link_local
+                      or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", zone)):
+        raise ValueError("invalid IPv6 zone")
+    if address is not None:
+        if address.version == 6 and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        return str(address) + (f"%{zone}" if separator else "")
+    if not _HOSTNAME_RE.fullmatch(host):
         raise ValueError("invalid host")
     return host
 

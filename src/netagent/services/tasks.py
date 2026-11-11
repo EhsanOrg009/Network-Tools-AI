@@ -25,6 +25,7 @@ from netagent.config import Settings
 from netagent.database import Database
 from netagent.schemas import ADMIN_TASK_TYPES, DIAGNOSTIC_TASK_TYPES
 from netagent.security import sign_task
+from netagent.scope import ToolScope, TargetNotAuthorized
 
 # Task types the agent may run without signed-envelope verification
 # (they are data-collection operations, not code execution).
@@ -140,17 +141,32 @@ def create_diagnostic_task(
         raise TaskError("agent not found or revoked")
     if db.pending_task_count(agent_id) >= 100:
         raise TaskError("too many pending tasks for this agent")
+    params = _bound_params(params)
+    if task_type == "connectivity_diagnostic":
+        params = authorize_connectivity_params(settings, params)
     return db.create_task(
         task_id=new_task_id(),
         agent_id=agent_id,
         type=task_type,
-        params=_bound_params(params),
+        params=params,
         origin="admin",
         created_by=created_by,
         timeout_seconds=timeout_seconds or settings.agent_task_default_timeout_seconds,
         ttl_seconds=ttl_seconds or settings.agent_task_default_ttl_seconds,
         priority=priority,
     )
+
+
+def authorize_connectivity_params(settings: Settings, params: dict) -> dict:
+    """Pin every remote diagnostic to an authorized numerical address.
+
+    Run both at admission and dispatch, so old queued tasks and changed
+    policy cannot bypass the same ToolScope used by local/LLM tools.
+    """
+    host = ToolScope(settings, []).authorize(
+        params.get("host") or params.get("target"), hostname=True, host_only=True,
+    )
+    return {**params, "host": host, "target": host}
 
 
 def create_admin_script_task(
@@ -260,6 +276,15 @@ def dispatch_task(
     task = db.claim_next_task(agent["id"], allowed_types=sorted(allowed))
     if task is None:
         return None
+    if task["type"] == "connectivity_diagnostic":
+        try:
+            task["params"] = authorize_connectivity_params(settings, task.get("params") or {})
+        except TargetNotAuthorized as exc:
+            with db.transaction():
+                db.complete_task(task["id"], ok=False, result={}, error=f"scope denied: {exc}")
+                db.record_audit(actor="system", action="task.scope_denied", target=task["id"],
+                                detail={"agent_id": agent["id"], "reason": str(exc)})
+            return None
 
     message: dict[str, Any] = {
         "task_id": task["id"],

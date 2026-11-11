@@ -1,5 +1,13 @@
 # شواهد اجرای فازها
 
+## بازبینی تکمیلی ۲۰۲۶-۱۱-۱۱ — Scope عامل نقطه‌پایان
+
+بیشتر فازها در مبنای `aa4962a` کامل بودند. خط پایهٔ تازه، پیش از تغییر کد: **۴۹۵ موفق، ۴ skipped** در Backend؛ **۲۹ موفق** در Dashboard و build موفق. `uv sync --check` بدون تغییر لازم بود. تغییرات موجود README، Security و benchmark حفظ شدند؛ `run.txt` دست‌نخورده است.
+
+یک مسیر جاافتاده بازتولید شد: API ساخت `connectivity_diagnostic` مقصد خارج از Scope را با 200 می‌پذیرفت و Endpoint نیز IPv6 را رد می‌کرد. آزمون اولیهٔ جدید ۸ شکست و ۳ موفق داشت. اکنون Scope مشترک هنگام ایجاد و تحویل تسک کنترل می‌شود؛ همهٔ پاسخ‌های DNS باید مجاز باشند و IP عددی به عامل می‌رسد. تسکِ منتظر پس از حذف مجوز با خطای ثبت‌شده و Audit Log متوقف می‌شود. در صفحهٔ Agent، مقصد ثابت خارجی حذف و ورودی صریح مقصد اضافه شد. IPv6 کامل/فشرده، mapped و link-local دارای zone در عامل پشتیبانی می‌شود.
+
+آزمون `uv run pytest tests/test_endpoint_scope.py tests/test_scope_enforcement.py tests/test_admin_api.py tests/test_agent_api.py tests/test_endpoint_result_spool.py tests/test_task_signing_v2.py -q`: **۱۰۵ موفق**. اسکن زنده اجرا نشد. build داشبورد نیز موفق بود. تنظیم CIDRهای مدیر تغییر نکرد.
+
 ## فاز ۰ — خط پایه
 
 سند `hardening-baseline.fa.md` وضعیت اولیه، بازبینی commitها و نتیجهٔ آزمون‌ها را ثبت می‌کند. `uv.lock` و وابستگی‌ها بدون تغییرند.

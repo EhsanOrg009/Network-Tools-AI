@@ -1523,6 +1523,8 @@ def create_task(
             timeout_seconds=body.timeout_seconds,
             ttl_seconds=body.ttl_seconds,
         )
+    except task_service.TargetNotAuthorized as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except task_service.TaskError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.record_audit(actor=actor, action="task.create", target=body.agent_id,

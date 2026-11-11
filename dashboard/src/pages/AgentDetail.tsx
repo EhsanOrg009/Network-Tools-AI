@@ -44,6 +44,7 @@ export default function AgentDetailPage() {
   const [refreshKey, setRefresh] = useState(0);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [busyTask, setBusyTask] = useState<string | null>(null);
+  const [diagnosticTarget, setDiagnosticTarget] = useState("");
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -69,7 +70,7 @@ export default function AgentDetailPage() {
     try {
       const params =
         type === "connectivity_diagnostic"
-          ? { target: "8.8.8.8" }
+          ? { target: diagnosticTarget.trim() }
           : {};
       await api.post("/api/admin/v1/tasks", { agent_id: agentId, type, params });
       toast.push(`تسک «${TASK_TYPE_FA[type] ?? type}» در صف قرار گرفت؛ نتیجه با ضربان بعدی عامل می‌آید.`, "success");
@@ -282,12 +283,17 @@ export default function AgentDetailPage() {
         <div className="grid-half">
           <Card title="درخواست تشخیص جدید">
             <div className="small muted" style={{ marginBottom: 12 }}>
-              تسک‌های تشخیصی بدون امضا ارسال می‌شوند و عامل پس از پذیرش، نتیجه را با نتیجه‌ی
-              همان تسک برمی‌گرداند. تسک‌های مدیریتی (کنسول/اسکریپت) از این‌جا ساخته نمی‌شوند.
+              برای تست اتصال، نشانی مقصد را از محدودهٔ مجاز مدیر وارد کنید.
+              نتیجه پس از اجرای تسک توسط عامل در همین صفحه نمایش داده می‌شود.
             </div>
+            <label className="small">مقصد تست اتصال
+              <input className="input technical" value={diagnosticTarget} dir="ltr"
+                onChange={(e) => setDiagnosticTarget(e.target.value)}
+                placeholder="IP / hostname" style={{ marginBottom: 12 }} />
+            </label>
             <div className="row wrap" style={{ gap: 8 }}>
               {["inventory_collection", "connectivity_diagnostic", "service_inventory", "network_configuration", "approved_network_diagnostic"].map((t) => (
-                <button key={t} className="btn sm" disabled={busyTask === t || a.status === "revoked"}
+                <button key={t} className="btn sm" disabled={busyTask === t || a.status === "revoked" || (t === "connectivity_diagnostic" && !diagnosticTarget.trim())}
                   onClick={() => requestTask(t)}>
                   {busyTask === t ? "…" : `+ ${TASK_TYPE_FA[t] ?? t}`}
                 </button>

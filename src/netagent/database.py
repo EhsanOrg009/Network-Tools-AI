@@ -475,7 +475,8 @@ def _now_iso() -> str:
 
 
 class Database:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, analysis_intake_limit: int = 1000):
+        self.analysis_intake_limit = analysis_intake_limit
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -709,7 +710,9 @@ class Database:
                     else None,
                 ),
             )
-            if self.security_ai_auto_enabled():
+            if self.security_ai_auto_enabled() and self._conn.execute(
+                "SELECT COUNT(*) FROM ai_analysis_intake"
+            ).fetchone()[0] < self.analysis_intake_limit:
                 from netagent.services.ai_analysis import analysis_priority
                 self._conn.execute(
                     "INSERT INTO ai_analysis_intake(alert_id, job_id, created_at, priority) VALUES(?,?,?,?)",
@@ -2173,19 +2176,45 @@ class Database:
     def security_ai_auto_enabled(self) -> bool:
         return self.get_meta("security_ai_auto_enabled") == "true"
 
-    def set_security_ai_auto(self, enabled: bool, *, actor: str) -> bool:
+    def set_security_ai_auto(self, enabled: bool, *, actor: str,
+                             backlog_policy: str | None = None, backlog_limit: int | None = None) -> bool:
         with self.transaction():
             old = self.security_ai_auto_enabled()
-            if old != enabled:
+            old_policy = self.get_meta("security_ai_backlog_policy") or "future_only"
+            policy = backlog_policy if backlog_policy is not None else old_policy
+            limit = backlog_limit if backlog_limit is not None else int(self.get_meta("security_ai_backlog_limit") or "50")
+            if policy not in {"future_only", "recent_unprocessed"} or not 1 <= limit <= 200:
+                raise ValueError("invalid automatic backlog policy")
+            changed = old != enabled or policy != old_policy or limit != int(self.get_meta("security_ai_backlog_limit") or "50")
+            if changed:
                 self.set_meta("security_ai_auto_enabled", "true" if enabled else "false")
+                self.set_meta("security_ai_backlog_policy", policy)
+                self.set_meta("security_ai_backlog_limit", str(limit))
+                admitted = 0
+                if enabled and not old and policy == "recent_unprocessed":
+                    from netagent.services.ai_analysis import analysis_priority
+                    room = max(0, self.analysis_intake_limit - self._conn.execute("SELECT COUNT(*) FROM ai_analysis_intake").fetchone()[0])
+                    rows = self._conn.execute(
+                        "SELECT al.* FROM alerts al LEFT JOIN alert_analyses a ON a.alert_id=al.id "
+                        "LEFT JOIN ai_analysis_intake i ON i.alert_id=al.id "
+                        "WHERE a.alert_id IS NULL AND i.alert_id IS NULL ORDER BY al.id DESC LIMIT ?",
+                        (min(room, limit),),
+                    ).fetchall()
+                    for row in rows:
+                        self._conn.execute("INSERT INTO ai_analysis_intake(alert_id,job_id,created_at,priority) VALUES(?,?,?,?)",
+                                           (row["id"], uuid.uuid4().hex, _now_iso(), analysis_priority(dict(row))))
+                    admitted = len(rows)
                 self.record_audit(actor=actor, action="ai_analysis.auto_mode", target="security",
-                                  detail={"previous": old, "enabled": enabled})
+                                  detail={"previous": old, "enabled": enabled, "backlog_policy": policy,
+                                          "backlog_limit": limit, "admitted": admitted})
             return enabled
 
     def promote_analysis_intake(self, capacity: int) -> int:
         """A bounded work window; durable intake retains overflow without loss."""
         from netagent.services.ai_analysis import alert_fingerprint
         with self.transaction():
+            if not self.security_ai_auto_enabled():
+                return 0
             active = self._conn.execute(
                 "SELECT COUNT(*) FROM alert_analyses WHERE status IN ('PENDING','PROCESSING')"
             ).fetchone()[0]
@@ -2208,10 +2237,24 @@ class Database:
             if alert is None:
                 return None
             row = self.get_alert_analysis(alert_id)
+            # Explicitly release ONLY the selected paused automatic job as
+            # manual. Preserve its ID and audit the administrator's intent.
+            if row and row["status"] == "PENDING" and row["origin"] != "manual" and not self.security_ai_auto_enabled():
+                if self.analysis_admission_count() >= capacity:
+                    raise AnalysisQueueFull("ظرفیت صف تحلیل پر است؛ بعداً دوباره تلاش کنید.")
+                if self._conn.execute("SELECT 1 FROM ai_analysis_intake WHERE alert_id=?", (alert_id,)).fetchone():
+                    self._conn.execute("DELETE FROM ai_analysis_intake WHERE alert_id=?", (alert_id,))
+                    self.enqueue_alert_analysis(alert_id=alert_id, fingerprint=alert_fingerprint(alert),
+                                                priority=analysis_priority(alert), origin="manual", job_id=row["job_id"])
+                else:
+                    self._conn.execute("UPDATE alert_analyses SET origin='manual' WHERE alert_id=?", (alert_id,))
+                self.record_audit(actor=actor, action="ai_analysis.analyze", target=str(alert_id),
+                                  detail={"job_id": row["job_id"], "previous_origin": row["origin"]})
+                return self.get_alert_analysis(alert_id)
             if row and (row["status"] in {"PENDING", "PROCESSING"} or
                         (row["status"] == "COMPLETED" and not reanalyze)):
                 return row
-            if self.pending_alert_analysis_count() >= capacity:
+            if self.analysis_admission_count() >= capacity:
                 raise AnalysisQueueFull("ظرفیت صف تحلیل پر است؛ بعداً دوباره تلاش کنید.")
             if row:
                 self.reset_alert_analysis(alert_id)
@@ -2224,17 +2267,38 @@ class Database:
                               detail={"job_id": result["job_id"]})
             return result
 
+    def analysis_admission_count(self) -> int:
+        """Paused automatic work cannot consume the manual admission budget."""
+        with self._lock:
+            automatic = self.security_ai_auto_enabled()
+            count = self._conn.execute(
+                "SELECT COUNT(*) FROM alert_analyses WHERE status='PROCESSING' "
+                "OR (status='PENDING' AND (origin='manual' OR ?))", (automatic,),
+            ).fetchone()[0]
+            if automatic:
+                count += self._conn.execute("SELECT COUNT(*) FROM ai_analysis_intake").fetchone()[0]
+            return count
+
     def analysis_summary(self) -> dict[str, Any]:
         with self._lock:
             counts = {status: 0 for status in ("PENDING", "PROCESSING", "COMPLETED", "FAILED")}
             counts.update({r[0]: r[1] for r in self._conn.execute(
                 "SELECT status,COUNT(*) FROM alert_analyses GROUP BY status")})
-            counts["PENDING"] += self._conn.execute("SELECT COUNT(*) FROM ai_analysis_intake").fetchone()[0]
+            intake_count = self._conn.execute("SELECT COUNT(*) FROM ai_analysis_intake").fetchone()[0]
+            counts["PENDING"] += intake_count
             last = self._conn.execute("SELECT MAX(analyzed_at) FROM alert_analyses").fetchone()[0]
             error = self._conn.execute(
                 "SELECT error FROM alert_analyses WHERE error IS NOT NULL ORDER BY analyzed_at DESC LIMIT 1"
             ).fetchone()
-            return {"auto_enabled": self.security_ai_auto_enabled(), "counts": counts,
+            paused = 0 if self.security_ai_auto_enabled() else self._conn.execute(
+                "SELECT COUNT(*) FROM alert_analyses WHERE origin!='manual' AND status='PENDING'"
+            ).fetchone()[0] + self._conn.execute("SELECT COUNT(*) FROM ai_analysis_intake").fetchone()[0]
+            return {"auto_enabled": self.security_ai_auto_enabled(), "counts": counts, "paused_automatic": paused,
+                    "backlog_policy": self.get_meta("security_ai_backlog_policy") or "future_only",
+                    "backlog_limit": int(self.get_meta("security_ai_backlog_limit") or "50"),
+                    "intake_capacity": self.analysis_intake_limit,
+                    "intake_count": intake_count,
+                    "unprocessed": self._conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] - sum(counts.values()),
                     "last_processed_at": last, "last_error": error[0] if error else None}
 
     def recover_processing_analyses(self, *, delay_seconds: float) -> None:
@@ -2268,8 +2332,8 @@ class Database:
             self._conn.execute(
                 "UPDATE alert_analyses SET provider_failures=0, status='PENDING', attempts=0 WHERE alert_id IN ("
                 "SELECT alert_id FROM alert_analyses WHERE status='FAILED' AND provider_failures>=? "
-                "AND next_retry_epoch<=? AND error LIKE 'LLMUnavailable:%' ORDER BY created_at,alert_id LIMIT ?)",
-                (max_attempts, datetime.now(timezone.utc).timestamp(), max(0, capacity - active)),
+                "AND next_retry_epoch<=? AND error LIKE 'LLMUnavailable:%' AND (origin='manual' OR ?) ORDER BY created_at,alert_id LIMIT ?)",
+                (max_attempts, datetime.now(timezone.utc).timestamp(), self.security_ai_auto_enabled(), max(0, capacity - active)),
             )
 
     def alert_analysis_history(self, alert_id: int) -> list[dict[str, Any]]:
@@ -2283,7 +2347,12 @@ class Database:
         job_id: str | None = None, origin: str = "legacy", created_at: str | None = None,
     ) -> bool:
         """Insert a PENDING analysis row; False when it already exists."""
-        with self._lock:
+        with self.transaction():
+            if origin != "manual" and not self.security_ai_auto_enabled():
+                return False
+            intake = self._conn.execute("SELECT * FROM ai_analysis_intake WHERE alert_id=?", (alert_id,)).fetchone()
+            if intake:
+                job_id, created_at = intake["job_id"], intake["created_at"]
             cur = self._conn.execute(
                 """
                 INSERT OR IGNORE INTO alert_analyses(
@@ -2292,6 +2361,7 @@ class Database:
                 """,
                 (alert_id, fingerprint, priority, created_at or _now_iso(), job_id or uuid.uuid4().hex, origin),
             )
+            self._conn.execute("DELETE FROM ai_analysis_intake WHERE alert_id=?", (alert_id,))
             self._commit()
         return cur.rowcount > 0
 
@@ -2333,10 +2403,11 @@ class Database:
             WHERE (a.status = 'PENDING' OR (a.status = 'FAILED' AND a.attempts < ?))
               AND a.next_retry_epoch <= ?
               AND a.provider_failures < ?
+              AND (a.origin = 'manual' OR ?)
             ORDER BY (a.priority - CAST(MAX(0, (? - unixepoch(a.created_at)) / ?) AS INTEGER)),
                      a.created_at, a.alert_id LIMIT ?
             """,
-            (max_attempts, now_epoch, max_attempts, now_epoch, max(1, starvation_minutes) * 60, steal_limit),
+            (max_attempts, now_epoch, max_attempts, self.security_ai_auto_enabled(), now_epoch, max(1, starvation_minutes) * 60, steal_limit),
         ).fetchall()
         return rows
 
@@ -2494,8 +2565,8 @@ class Database:
     def start_alert_analysis(self, alert_id: int) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE alert_analyses SET status = 'PROCESSING' WHERE alert_id = ?",
-                (alert_id,),
+                "UPDATE alert_analyses SET status = 'PROCESSING' WHERE alert_id = ? AND (origin='manual' OR ?)",
+                (alert_id, self.security_ai_auto_enabled()),
             )
             self._commit()
 

@@ -86,6 +86,7 @@ def test_claim_is_priority_ordered_not_fifo(db, settings):
     critical = _seed_same_behavior_fixed(db, "11.0.0.6", 2222, severity=1, count=1)[0]
     fp_map = {a["id"]: alert_fingerprint(a) for a in db.query_alerts(limit=10)[0]}
     for aid in (low, critical):
+        db.set_security_ai_auto(True, actor="test-admin")
         db.enqueue_alert_analysis(
             alert_id=aid, fingerprint=fp_map[aid], priority=analysis_priority(
                 db.get_alert(aid)
@@ -101,6 +102,7 @@ def test_claim_is_priority_ordered_not_fifo(db, settings):
 def test_anti_starvation_eventually_processes_low_priority(db, settings):
     low = _seed_same_behavior_fixed(db, "11.0.0.7", 3333, severity=4, count=1)[0]
     fp = alert_fingerprint(db.get_alert(low))
+    db.set_security_ai_auto(True, actor="test-admin")
     db.enqueue_alert_analysis(alert_id=low, fingerprint=fp, priority=6)
     # 2 hours of waiting (>= 6 starvation intervals) → 4-level boost
     row = db.claim_next_alert_analysis(
@@ -112,11 +114,13 @@ def test_anti_starvation_eventually_processes_low_priority(db, settings):
 def test_fresh_critical_wins_over_aged_low(db, settings):
     low = _seed_same_behavior_fixed(db, "11.0.0.8", 4444, severity=4, count=1)[0]
     fp = alert_fingerprint(db.get_alert(low))
+    db.set_security_ai_auto(True, actor="test-admin")
     db.enqueue_alert_analysis(alert_id=low, fingerprint=fp, priority=6)
     critical_just_arrived = _seed_same_behavior_fixed(
         db, "11.0.0.9", 5555, severity=1, count=1
     )[0]
     fresh_fp = alert_fingerprint(db.get_alert(critical_just_arrived))
+    db.set_security_ai_auto(True, actor="test-admin")
     db.enqueue_alert_analysis(
         alert_id=critical_just_arrived, fingerprint=fresh_fp, priority=1
     )
@@ -163,6 +167,7 @@ def test_batch_claim_groups_same_source_and_rule(db, settings):
     ids_a = _seed_same_behavior_fixed(db, "11.0.1.1", 9001, severity=2, count=4)
     ids_b = _seed_same_behavior_fixed(db, "11.0.1.9", 9009, severity=4, count=3)
     for a in db.query_alerts(limit=20)[0]:
+        db.set_security_ai_auto(True, actor="test-admin")
         db.enqueue_alert_analysis(
             alert_id=a["id"], fingerprint=alert_fingerprint(a),
             priority=analysis_priority(a),
@@ -187,6 +192,7 @@ def test_worker_batch_complete_and_per_alert_results(db, settings):
     settings.ai_analysis_batch_size = 5
     ids = _seed_same_behavior_fixed(db, "11.0.2.1", 7001, severity=2, count=4)
     for a in db.query_alerts(limit=20)[0]:
+        db.set_security_ai_auto(True, actor="test-admin")
         db.enqueue_alert_analysis(
             alert_id=a["id"], fingerprint=alert_fingerprint(a),
             priority=analysis_priority(a),
@@ -235,6 +241,7 @@ def test_worker_batch_invalid_shape_falls_back_to_individual(db, settings):
     settings.ai_analysis_batch_size = 5
     _seed_same_behavior_fixed(db, "11.0.3.1", 7002, severity=2, count=2)
     for a in db.query_alerts(limit=20)[0]:
+        db.set_security_ai_auto(True, actor="test-admin")
         db.enqueue_alert_analysis(
             alert_id=a["id"], fingerprint=alert_fingerprint(a),
             priority=analysis_priority(a),
@@ -267,6 +274,7 @@ def test_queue_survives_database_reopen(tmp_path, settings):
     try:
         ids = _seed_same_behavior_fixed(db, "11.0.4.1", 7003, severity=1, count=2)
         for a in db.query_alerts(limit=20)[0]:
+            db.set_security_ai_auto(True, actor="test-admin")
             db.enqueue_alert_analysis(
                 alert_id=a["id"], fingerprint=alert_fingerprint(a),
                 priority=analysis_priority(a),

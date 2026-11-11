@@ -56,6 +56,7 @@ def _high_importance_ending(db, settings, importance: str) -> int:
 
     alert_id = _seed_alert(db)
     worker = AlertAnalysisWorker(db, settings, Sometimes())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
     return alert_id

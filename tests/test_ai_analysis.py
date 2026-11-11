@@ -85,7 +85,9 @@ def test_fingerprint_is_stable_and_field_sensitive(db):
 def test_worker_completes_analysis_end_to_end(db, settings):
     alert_id = _seed_alert(db)
     worker = AlertAnalysisWorker(db, settings, FakeLLM())
+    db.set_security_ai_auto(True, actor="test-admin")
     assert worker.enqueue_missing() == 1
+    db.set_security_ai_auto(True, actor="test-admin")
     assert worker.enqueue_missing() == 0  # dedupe: fingerprint row exists
     assert worker.process_one() is True
     row = db.get_alert_analysis(alert_id)
@@ -107,6 +109,7 @@ def test_worker_failure_is_bounded_and_stored(db, settings):
             return "not json"
 
     worker = AlertAnalysisWorker(db, settings, BadLLM())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     for _ in range(10):
         worker.process_one()
@@ -122,6 +125,7 @@ def test_worker_failure_is_bounded_and_stored(db, settings):
 def test_worker_offline_llm_is_never_fatal(db, settings):
     _seed_alert(db)
     worker = AlertAnalysisWorker(db, settings, None)
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     assert worker.process_one() is False  # idles; queue preserved
 
@@ -137,6 +141,7 @@ def test_prompt_marks_evidence_as_data_and_bounds_it():
 def test_ai_analyses_api_requires_admin(ai_client, db):
     alert_id = _seed_alert(db)
     worker = AlertAnalysisWorker(db, ai_client.app.state.settings, FakeLLM())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
 
@@ -156,6 +161,7 @@ def test_ai_analyses_api_requires_admin(ai_client, db):
 def test_reanalyze_resets_and_audits(ai_client, db):
     alert_id = _seed_alert(db)
     worker = AlertAnalysisWorker(db, ai_client.app.state.settings, FakeLLM())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
 

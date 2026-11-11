@@ -4,7 +4,7 @@
  * the AI column is clearly labeled as the model's interpretation.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import type { AlertRow } from "../lib/types";
 import { faNum, fmtAgo, fmtDateTime, severityLabel } from "../lib/format";
@@ -15,6 +15,7 @@ import { IconShield, IconAlert } from "../components/icons";
 export interface AlertAnalysisRow {
   alert_id: number;
   job_id?: string;
+  origin?: string;
   provider_failures?: number;
   status: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
   summary: string | null;
@@ -38,6 +39,13 @@ interface SecurityAIStatus {
   model: string;
   connection: { ok: boolean; detail: string };
   worker_enabled: boolean;
+  backlog_policy: "future_only" | "recent_unprocessed";
+  backlog_limit: number;
+  paused_automatic: number;
+  capacity: number;
+  intake_capacity: number;
+  intake_count: number;
+  unprocessed: number;
 }
 
 const importanceBadge: Record<string, string> = {
@@ -48,7 +56,7 @@ const likelihoodFa: Record<string, string> = {
 };
 const analysisStatusFa = { PENDING: "در صف", PROCESSING: "در حال پردازش", COMPLETED: "تکمیل‌شده", FAILED: "ناموفق" };
 
-function AnalysisCell({ analysis, onOpen, unavailable }: { analysis?: AlertAnalysisRow; onOpen: () => void; unavailable: boolean }) {
+function AnalysisCell({ analysis, onOpen, unavailable, paused }: { analysis?: AlertAnalysisRow; onOpen: () => void; unavailable: boolean; paused: boolean }) {
   if (unavailable) return <span className="small muted">وضعیت تحلیل نامشخص</span>;
   if (!analysis) return <span className="small muted">تحلیل نشده</span>;
   if (analysis.status === "COMPLETED") {
@@ -68,6 +76,7 @@ function AnalysisCell({ analysis, onOpen, unavailable }: { analysis?: AlertAnaly
     return <span className="badge badge-accent"><span className="dot pulse" />در حال تحلیل…</span>;
   }
   if (analysis.status === "PENDING") {
+    if (paused) return <span className="badge badge-warn">متوقف — خودکار خاموش</span>;
     return <span className="badge badge-muted" title={analysis.error ?? undefined}>{analysis.error ? "در صف — خطای مدل" : "در صف"}</span>;
   }
   return (
@@ -93,27 +102,44 @@ export default function SecurityPage() {
   const [aiError, setAIError] = useState<string | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const [backlogPolicy, setBacklogPolicy] = useState<"future_only" | "recent_unprocessed">("future_only");
+  const [backlogLimit, setBacklogLimit] = useState(50);
+  const initializedPolicy = useRef(false);
+  const sequence = useRef(0);
+  const actionInFlight = useRef(false);
+  const pageSize = 50;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const version = ++sequence.current;
+    const current = () => !signal?.aborted && version === sequence.current;
     try {
       setError(null);
       const sevQ = sev === "all" ? "" : `&severity=${sev}`;
       const [d, status] = await Promise.all([
         api.get<{ items: AlertRow[]; total: number }>(
-          `/api/alerts?limit=200&group_by_flow=false${sevQ}`,
+          `/api/alerts?limit=${pageSize}&offset=${page * pageSize}&group_by_flow=false${sevQ}`, { signal },
         ),
-        api.get<SecurityAIStatus>("/api/admin/v1/security-ai").catch(() => null),
+        api.get<SecurityAIStatus>("/api/admin/v1/security-ai", { signal }).catch(() => null),
       ]);
+      if (!current()) return;
       setAlerts(d.items);
       setTotal(d.total);
       setAIStatus(status);
+      if (status && !initializedPolicy.current) {
+        setBacklogPolicy(status.backlog_policy ?? "future_only");
+        setBacklogLimit(status.backlog_limit ?? 50);
+        initializedPolicy.current = true;
+      }
       let ai: { items: AlertAnalysisRow[] };
       try {
         ai = d.items.length ? await api.get<{ items: AlertAnalysisRow[] }>(
-          `/api/admin/v1/ai-analyses?alert_ids=${d.items.map((a) => a.id).join(",")}`,
+          `/api/admin/v1/ai-analyses?alert_ids=${d.items.map((a) => a.id).join(",")}`, { signal },
         ) : { items: [] };
+        if (!current()) return;
         setAIError(status ? null : "دریافت وضعیت مدل و تنظیم خودکار ناموفق بود.");
       } catch (e) {
+        if (!current()) return;
         setAIError(e instanceof ApiError ? e.detail : "دریافت وضعیت تحلیل ناموفق بود.");
         return;
       }
@@ -123,31 +149,34 @@ export default function SecurityPage() {
       }
       setAnalyses(map);
     } catch (e) {
+      if (!current()) return;
       setError(
         e instanceof ApiError ? e.detail
         : e instanceof Error ? e.message
         : "خطای ناشناخته",
       );
     }
-  }, [sev]);
+  }, [sev, page]);
 
   useEffect(() => {
     let stopped = false;
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
-      await load();
+      await load(controller.signal);
       if (!stopped) timer = setTimeout(refresh, 5000);
     };
     void refresh();
-    return () => { stopped = true; clearTimeout(timer); };
+    return () => { stopped = true; controller.abort(); clearTimeout(timer); };
   }, [load, refreshKey]);
 
   const toggleAuto = async () => {
-    if (!aiStatus) return;
+    if (!aiStatus || autoBusy) return;
     setAutoBusy(true);
     setActionError(null);
     try {
-      await api.put("/api/admin/v1/security-ai/automatic", { enabled: !aiStatus.auto_enabled });
+      await api.put("/api/admin/v1/security-ai/automatic", { enabled: !aiStatus.auto_enabled,
+        backlog_policy: backlogPolicy, backlog_limit: backlogLimit });
       await load();
     } catch (e) {
       setActionError(e instanceof ApiError ? e.detail : "تغییر حالت خودکار ناموفق بود.");
@@ -155,6 +184,8 @@ export default function SecurityPage() {
   };
 
   const analyze = async (alertId: number) => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusy(alertId);
     setActionError(null);
     try {
@@ -162,10 +193,12 @@ export default function SecurityPage() {
       await load();
     } catch (e) {
       setActionError(e instanceof ApiError ? e.detail : "ثبت تحلیل ناموفق بود.");
-    } finally { setBusy(null); }
+    } finally { setBusy(null); actionInFlight.current = false; }
   };
 
   const reanalyze = useCallback(async (alertId: number) => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusy(alertId);
     setActionError(null);
     try {
@@ -175,6 +208,7 @@ export default function SecurityPage() {
       setActionError(e instanceof ApiError ? e.detail : "تحلیل مجدد ناموفق بود.");
     } finally {
       setBusy(null);
+      actionInFlight.current = false;
     }
   }, [load]);
 
@@ -213,7 +247,20 @@ export default function SecurityPage() {
             onClick={() => { void toggleAuto(); }}>
             {aiStatus ? (aiStatus.auto_enabled ? "روشن — ON" : "خاموش — OFF") : "در حال دریافت وضعیت…"}
           </button>
-          <span className="small muted">فقط هشدارهای تازه؛ تحلیل دستی همیشه مستقل است.</span>
+          <span className="small muted">در حالت خاموش صف خودکار متوقف می‌ماند؛ تحلیل دستی مستقل است.</span>
+        </div>
+        <div className="row wrap small" style={{ marginTop: 12 }}>
+          <label htmlFor="backlog-policy">هنگام روشن‌کردن:</label>
+          <select id="backlog-policy" className="input" style={{ width: 260 }} disabled={autoBusy || aiStatus?.auto_enabled}
+            value={backlogPolicy} onChange={(e) => setBacklogPolicy(e.target.value as typeof backlogPolicy)}>
+            <option value="future_only">فقط هشدارهای آینده</option>
+            <option value="recent_unprocessed">آخرین هشدارهای تحلیل‌نشده</option>
+          </select>
+          {backlogPolicy === "recent_unprocessed" && <label className="row">حداکثر
+            <input aria-label="تعداد هشدارهای قدیمی" type="number" className="input" style={{ width: 90 }} min={1} max={200}
+              disabled={autoBusy || aiStatus?.auto_enabled} value={backlogLimit} onChange={(e) => setBacklogLimit(Number(e.target.value))} />
+            هشدار (۱ تا ۲۰۰)</label>}
+          <span className="muted">تحلیل‌های شروع‌شده تکمیل می‌شوند؛ کارهای منتظر تا روشن‌کردن یا درخواست تکی محفوظ‌اند.</span>
         </div>
         {aiStatus && <>
           <div className="row wrap small" style={{ gap: 16, marginTop: 12 }}>
@@ -221,6 +268,8 @@ export default function SecurityPage() {
             <span>در حال پردازش: {faNum(aiStatus.counts.PROCESSING)}</span>
             <span>موفق: {faNum(aiStatus.counts.COMPLETED)}</span>
             <span>ناموفق: {faNum(aiStatus.counts.FAILED)}</span>
+            <span>خودکار متوقف: {faNum(aiStatus.paused_automatic ?? 0)}</span>
+            <span>بدون درخواست تحلیل: {faNum(aiStatus.unprocessed ?? 0)}</span>
             <span>آخرین پردازش: {aiStatus.last_processed_at ? fmtDateTime(aiStatus.last_processed_at) : "هنوز پردازشی ثبت نشده"}</span>
           </div>
           <div className="small" style={{ marginTop: 8 }}>
@@ -229,6 +278,9 @@ export default function SecurityPage() {
             {!aiStatus.worker_enabled && " · worker تحلیل در تنظیمات سرور غیرفعال است؛ درخواست‌ها محفوظ می‌مانند."}
           </div>
           {aiStatus.last_error && <div className="small" role="status">آخرین خطا: {aiStatus.last_error}</div>}
+          {aiStatus.intake_count >= aiStatus.intake_capacity && <p role="status" className="small" style={{ color: "var(--warn)" }}>
+            ورودی خودکار به سقف ظرفیت رسیده است. هشدارهای بعدی ذخیره می‌شوند و برای تحلیل تکی یا انتخاب محدود تاریخچه در دسترس‌اند.
+          </p>}
         </>}
         {(aiError || actionError) && <div role="alert" style={{ color: "var(--danger)", marginTop: 8 }}>{actionError || aiError}</div>}
       </div>
@@ -243,14 +295,14 @@ export default function SecurityPage() {
             </div>
           </div>
           <div className="spacer" />
-          <select className="input" style={{ width: 140 }} value={sev} onChange={(e) => { setSev(e.target.value); setRefresh((k) => k + 1); }}>
+          <select aria-label="شدت هشدار" className="input" style={{ width: 140 }} value={sev} onChange={(e) => { setSev(e.target.value); setPage(0); }}>
             <option value="all">همه‌ی شدت‌ها</option>
             <option value="1">بحرانی (1)</option>
             <option value="2">مهم (2)</option>
             <option value="3">متوسط (3)</option>
             <option value="4">کم (4)</option>
           </select>
-          <select className="input" style={{ width: 160 }} value={aiFilter} onChange={(e) => setAiFilter(e.target.value)}>
+          <select aria-label="وضعیت تحلیل در این صفحه" className="input" style={{ width: 160 }} value={aiFilter} onChange={(e) => setAiFilter(e.target.value)}>
             <option value="all">تحلیل: همه</option>
             <option value="COMPLETED">تحلیل‌شده</option>
             <option value="PENDING">در صف تحلیل</option>
@@ -258,7 +310,7 @@ export default function SecurityPage() {
             <option value="FAILED">خطای تحلیل</option>
             <option value="none">بدون تحلیل</option>
           </select>
-          <input className="input" style={{ width: 200 }} placeholder="IP یا نام امضا…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input aria-label="جست‌وجو در هشدارهای این صفحه" className="input" style={{ width: 200 }} placeholder="جست‌وجو در این صفحه…" value={q} onChange={(e) => setQ(e.target.value)} />
           <button className="btn" onClick={() => setRefresh((k) => k + 1)}>↻ به‌روزرسانی</button>
         </div>
       </div>
@@ -284,7 +336,7 @@ export default function SecurityPage() {
         {alerts === null && !error ? <SkeletonRows rows={6} />
           : error ? <ErrorState message={error} onRetry={() => setRefresh((k) => k + 1)} />
             : filtered.length === 0 ? (
-              <EmptyState title="هشداری مطابق فیلتر نیست" hint="بدون فیلتر، آخرین ۲۰۰ هشدار نمایش داده می‌شود." />
+              <EmptyState title="هشداری مطابق فیلتر نیست" hint="فیلتر تحلیل و جست‌وجو روی همین صفحه اعمال می‌شوند؛ صفحه‌بندی برای همهٔ هشدارها در دسترس است." />
             ) : (
               <div className="table-wrap">
                 <table className="data">
@@ -295,7 +347,7 @@ export default function SecurityPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.slice(0, 150).map((a) => (
+                    {filtered.map((a) => (
                       <tr key={a.id} className="clickable" onClick={() => setDetail(a)}>
                         <td>
                           <span className={`badge ${a.severity <= 1 ? "badge-danger" : a.severity === 2 ? "badge-warn" : "badge-muted"}`}>
@@ -311,12 +363,13 @@ export default function SecurityPage() {
                               : <span className="badge badge-warn">allowed</span>}
                         </td>
                         <td onClick={(e) => e.stopPropagation()}>
-                          <AnalysisCell analysis={analyses.get(a.id)} unavailable={!!aiError} onOpen={() => setDetail(a)} />
-                          <button className="btn ghost" disabled={busy === a.id || !!aiError}
+                          <AnalysisCell analysis={analyses.get(a.id)} unavailable={!!aiError} paused={aiStatus?.auto_enabled === false && analyses.get(a.id)?.origin !== "manual"} onOpen={() => setDetail(a)} />
+                          <button className="btn ghost" disabled={busy !== null || !!aiError}
                             aria-label={`تحلیل با هوش مصنوعی هشدار ${a.id}`}
                             onClick={() => {
                               const state = analyses.get(a.id)?.status;
-                              if (state && state !== "FAILED") setDetail(a);
+                              const paused = state === "PENDING" && aiStatus?.auto_enabled === false && analyses.get(a.id)?.origin !== "manual";
+                              if (state && state !== "FAILED" && !paused) setDetail(a);
                               else void analyze(a.id);
                             }}>
                             {busy === a.id ? "…" : analyses.get(a.id)?.status === "FAILED" ? "تلاش دوباره" : "تحلیل با هوش مصنوعی"}
@@ -330,6 +383,12 @@ export default function SecurityPage() {
               </div>
             )}
       </Card>
+      <div className="pagination row wrap" style={{ marginTop: 12 }}>
+        <span className="small muted">صفحهٔ {faNum(page + 1)} از {faNum(Math.max(1, Math.ceil(total / pageSize)))} · {faNum(filtered.length)} ردیف در این صفحه</span>
+        <div className="spacer" />
+        <button className="btn sm" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>صفحهٔ قبل</button>
+        <button className="btn sm" disabled={(page + 1) * pageSize >= total} onClick={() => setPage((p) => p + 1)}>صفحهٔ بعد</button>
+      </div>
 
       {detail && (
         <div className="modal-backdrop" onClick={() => setDetail(null)}>

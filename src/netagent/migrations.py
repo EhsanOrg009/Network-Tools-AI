@@ -1,6 +1,10 @@
 """مهاجرت‌های افزایشی و تکرارپذیر؛ داده‌ها و شناسه‌های موجود حفظ می‌شوند."""
 
 MIGRATIONS = {
+    "004_security_ai_backlog_policy": """
+        INSERT OR IGNORE INTO meta(key,value) VALUES('security_ai_backlog_policy','future_only');
+        INSERT OR IGNORE INTO meta(key,value) VALUES('security_ai_backlog_limit','50');
+    """,
     "003_security_ai_control": """
         INSERT OR IGNORE INTO meta(key, value) VALUES('security_ai_auto_enabled', 'false');
         ALTER TABLE alert_analyses ADD COLUMN job_id TEXT;

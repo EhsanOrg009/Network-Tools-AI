@@ -275,6 +275,8 @@ class AlertAnalysisWorker:
         Automatic admission happens atomically in Database.insert_alert.
         Kept for existing offline callers; APIs use request_alert_analysis.
         """
+        if not self.db.security_ai_auto_enabled():
+            return 0
         limit = limit or self.settings.ai_analysis_backlog_limit
         backlog = self.db.pending_alert_analysis_count()
         room = max(0, limit - backlog)

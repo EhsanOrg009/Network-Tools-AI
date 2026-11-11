@@ -12,11 +12,11 @@ Hard separation rules (enforced structurally, not by prompt):
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool
 
 import hashlib
 
@@ -491,6 +491,8 @@ def list_ai_analyses(
 
 class SecurityAutoAnalysisBody(BaseModel):
     enabled: StrictBool
+    backlog_policy: Literal["future_only", "recent_unprocessed"] | None = None
+    backlog_limit: int | None = Field(default=None, ge=1, le=200, strict=True)
 
 
 @router.get("/security-ai", tags=["مدیریت مدیر شبکه"], summary="وضعیت واقعی صف و کنترل تحلیل امنیت",
@@ -508,14 +510,15 @@ def security_ai_status(request: Request) -> dict[str, Any]:
 
 
 @router.put("/security-ai/automatic", tags=["مدیریت مدیر شبکه"], summary="تغییر ماندگار تحلیل خودکار؛ پیش‌فرض خاموش",
-            description="فقط مدیر؛ تغییر همراه حسابرسی ذخیره می‌شود. روشن‌کردن شامل تاریخچه نمی‌شود و خاموش‌کردن صف قبلی را حفظ می‌کند.",
+            description="فقط مدیر با حسابرسی. پیش‌فرض فقط رویدادهای آینده؛ recent_unprocessed حداکثر backlog_limit رویداد جدیدِ تحلیل‌نشده را هنگام روشن‌کردن می‌پذیرد. خاموش‌کردن کارهای خودکار منتظر را متوقف می‌کند؛ کارهای شروع‌شده تکمیل می‌شوند.",
             responses=_responses("حالت ذخیره‌شده.", {"auto_enabled": True}))
 def set_security_ai_auto(request: Request, body: SecurityAutoAnalysisBody,
                         authorization: str | None = Header(default=None, description="توکن مدیر با پیشوند Bearer."),
                         x_admin_actor: str | None = Header(default=None, description="برچسب اختیاری مدیر برای حسابرسی.")) -> dict[str, Any]:
     db, _ = _ctx(request)
     actor = _guard(request, authorization, x_admin_actor)
-    return {"auto_enabled": db.set_security_ai_auto(body.enabled, actor=actor)}
+    return {"auto_enabled": db.set_security_ai_auto(body.enabled, actor=actor,
+            backlog_policy=body.backlog_policy, backlog_limit=body.backlog_limit)}
 
 
 @router.post("/ai-analyses/{alert_id}/analyze", tags=["مدیریت مدیر شبکه"], summary="تحلیل فقط یک هشدار با جلوگیری از تکرار",

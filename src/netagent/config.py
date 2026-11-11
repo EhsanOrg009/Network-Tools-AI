@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     # Bounded processing window and manual admission capacity. Automatic
     # overflow remains in durable intake until there is room; no alert is lost.
     ai_analysis_backlog_limit: int = Field(default=200, ge=10, le=5000)
+    # Overflow beyond this bound remains stored as unprocessed alerts and
+    # can be admitted explicitly with the recent backlog policy or manually.
+    ai_analysis_intake_limit: int = Field(default=1000, ge=10, le=10000)
     # Batch analysis: related alerts (same source IP + same rule + same
     # severity) share one model request to cut request count on weak local
     # hardware. Each alert still gets its own stored result; uncovered items

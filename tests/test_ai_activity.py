@@ -61,6 +61,7 @@ def _seed_batch_of_lookalike_alerts(db, count=3, src_ip="12.0.0.1"):
     alerts, _t = db.query_alerts(limit=20)
     ids = [a["id"] for a in alerts][:count]
     for aid in ids:
+        db.set_security_ai_auto(True, actor="test-admin")
         db.enqueue_alert_analysis(
             alert_id=aid,
             fingerprint=alert_fingerprint(db.get_alert(aid)),
@@ -261,6 +262,7 @@ def test_traced_chat_records_truncated_stream_finish_in_trace(db):
 def test_worker_records_activity_per_request(db, settings):
     _seed_alert(db)
     worker = AlertAnalysisWorker(db, settings, FakeLLM())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
     items, _total = db.list_ai_activity(task_type="alert_analysis")
@@ -306,6 +308,7 @@ def test_worker_offline_llm_records_failure_not_success(db, settings):
             raise LLMUnavailable("LLM request failed: APITimeoutError")
 
     worker = AlertAnalysisWorker(db, settings, Offline())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
     items, _t = db.list_ai_activity()

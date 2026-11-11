@@ -76,6 +76,7 @@ def test_single_invalid_json_is_classified(db, settings):
             return "این متن هیچ JSON ندارد"
 
     w = _worker(db, settings, Bad())
+    db.set_security_ai_auto(True, actor="test-admin")
     w.enqueue_missing()
     w.process_one()
     row = db.get_alert_analysis(1)
@@ -93,6 +94,7 @@ def test_single_missing_field_distinct_from_invalid_json(db, settings):
             return json.dumps(payload, ensure_ascii=False)
 
     w = _worker(db, settings, Partial())
+    db.set_security_ai_auto(True, actor="test-admin")
     w.enqueue_missing()
     w.process_one()
     row = db.get_alert_analysis(1)
@@ -111,6 +113,7 @@ def test_single_bad_enum_reports_schema_error(db, settings):
             return json.dumps(payload, ensure_ascii=False)
 
     w = _worker(db, settings, Buggy())
+    db.set_security_ai_auto(True, actor="test-admin")
     w.enqueue_missing()
     w.process_one()
     row = db.get_alert_analysis(1)
@@ -137,6 +140,7 @@ def test_partial_json_outputs_never_marked_completed(db, settings):
             return json.dumps({"summary": payload["summary"]}, ensure_ascii=False)[:20]
 
     w = _worker(db, settings, Trunc())
+    db.set_security_ai_auto(True, actor="test-admin")
     w.enqueue_missing()
     w.process_one()
     row = db.get_alert_analysis(1)
@@ -197,6 +201,7 @@ def test_batch_unknown_and_duplicate_ids_skipped_not_attributed(db, settings):
             return json.dumps(payload, ensure_ascii=False)
 
     w = _worker(db, settings, Batch())
+    db.set_security_ai_auto(True, actor="test-admin")
     w.enqueue_missing()
     w.process_one()
     rows = {r["alert_id"]: r for r in db.list_alert_analyses()}
@@ -226,6 +231,7 @@ def test_batch_result_for_missing_stage_falls_back_to_single(db, settings):
 
     from netagent.schemas import AlertAnalysis
     w = _worker(db, settings, Empty())
+    db.set_security_ai_auto(True, actor="test-admin")
     w.enqueue_missing()
     w.process_one()
     row = db.get_alert_analysis(1)

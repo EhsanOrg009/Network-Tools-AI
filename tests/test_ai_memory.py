@@ -165,6 +165,7 @@ def test_worker_uses_approved_memory_and_sanitize_ids(db, settings):
             return super().chat(messages)
 
     worker = AlertAnalysisWorker(db, settings, MemFake())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
     user_msg = captured["messages"][1]["content"]
@@ -178,6 +179,7 @@ def test_worker_uses_approved_memory_and_sanitize_ids(db, settings):
             return json.dumps(payload, ensure_ascii=False)
 
     worker2 = AlertAnalysisWorker(db, settings, Lying())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker2.enqueue_missing()
     alert_ids = [a["id"] for a in db.query_alerts(limit=5)[0]]
     # reanalyze to force another pass
@@ -198,6 +200,7 @@ def test_worker_no_memories_leaves_block_out(db, settings):
 
     Plain.seen = []
     worker = AlertAnalysisWorker(db, settings, Plain())
+    db.set_security_ai_auto(True, actor="test-admin")
     worker.enqueue_missing()
     worker.process_one()
     # the user message must stay free of any memory context; the *system*

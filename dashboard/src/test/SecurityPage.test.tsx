@@ -61,7 +61,7 @@ describe("SecurityPage AI analysis", () => {
   });
 
   it("shows pending/failed states without crashing", async () => {
-    mockBackend({ analyses: [{ alert_id: 34, status: "PENDING" }] });
+    mockBackend({ analyses: [{ alert_id: 34, status: "PENDING", origin: "manual" }] });
     renderPage();
     await waitFor(() => expect(screen.getByText("در صف")).toBeInTheDocument());
   });
@@ -120,11 +120,11 @@ describe("SecurityPage AI analysis", () => {
     await screen.findByText("خاموش — OFF");
     fireEvent.click(screen.getByRole("switch"));
     await screen.findByText("روشن — ON");
-    expect(mockedApi.put).toHaveBeenCalledWith("/api/admin/v1/security-ai/automatic", { enabled: true });
+    expect(mockedApi.put).toHaveBeenCalledWith("/api/admin/v1/security-ai/automatic", { enabled: true, backlog_policy: "future_only", backlog_limit: 50 });
   });
 
   it.each(["PENDING", "PROCESSING", "COMPLETED"])("opens existing %s job without another Analyze request", async (status) => {
-    mockBackend({ analyses: [{ alert_id: 34, status, job_id: "existing-job", summary: "خلاصه" }] });
+    mockBackend({ analyses: [{ alert_id: 34, status, origin: "manual", job_id: "existing-job", summary: "خلاصه" }] });
     renderPage();
     const button = await screen.findByRole("button", { name: "تحلیل با هوش مصنوعی هشدار 34" });
     fireEvent.click(button);
@@ -149,5 +149,52 @@ describe("SecurityPage AI analysis", () => {
     await screen.findByText("دسترسی نامعتبر");
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
     expect(screen.getByText(ALERT.signature)).toBeInTheDocument();
+  });
+
+  it("opening and refreshing the page never submit analysis jobs", async () => {
+    mockBackend({ analyses: [] });
+    renderPage();
+    await screen.findByText("تحلیل نشده");
+    fireEvent.click(screen.getByText("↻ به‌روزرسانی"));
+    await waitFor(() => expect(mockedApi.get.mock.calls.filter(([p]) => p.startsWith("/api/alerts")).length).toBeGreaterThan(1));
+    expect(mockedApi.post).not.toHaveBeenCalled();
+    expect(mockedApi.put).not.toHaveBeenCalled();
+  });
+
+  it("one pending request disables repeated clicks and shows its error", async () => {
+    mockBackend({ analyses: [] });
+    let reject!: (reason: Error) => void;
+    mockedApi.post.mockImplementation(() => new Promise((_, r) => { reject = r; }));
+    renderPage();
+    const button = await screen.findByRole("button", { name: "تحلیل با هوش مصنوعی هشدار 34" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    expect(mockedApi.post).toHaveBeenCalledTimes(1);
+    reject(new apiModule.ApiError(429, "صف پر است"));
+    await screen.findByText("صف پر است");
+    expect(button).toBeEnabled();
+  });
+
+  it("manually releases a selected paused automatic job while OFF", async () => {
+    mockBackend({ analyses: [{ alert_id: 34, status: "PENDING", origin: "automatic" }] });
+    renderPage();
+    await screen.findByText("متوقف — خودکار خاموش");
+    fireEvent.click(screen.getByRole("button", { name: "تحلیل با هوش مصنوعی هشدار 34" }));
+    await waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith("/api/admin/v1/ai-analyses/34/analyze"));
+    expect(mockedApi.put).not.toHaveBeenCalled();
+  });
+
+  it("uses bounded server pages instead of silently hiding older rows", async () => {
+    mockedApi.get.mockImplementation(async (path) => {
+      if (path.startsWith("/api/alerts")) return { items: [ALERT], total: 120 };
+      if (path === "/api/admin/v1/security-ai") return STATUS;
+      return { items: [] };
+    });
+    renderPage();
+    await screen.findByText("تحلیل نشده");
+    fireEvent.click(screen.getByRole("button", { name: "صفحهٔ بعد" }));
+    await waitFor(() => expect(mockedApi.get.mock.calls.some(([p]) => p.includes("limit=50&offset=50"))).toBe(true));
+    expect(mockedApi.post).not.toHaveBeenCalled();
   });
 });

@@ -44,7 +44,7 @@ def test_fresh_default_and_reopen_stay_off(db, settings):
         other.close()
 
 
-def test_enable_only_future_events_disable_retains_queue(db, settings):
+def test_enable_only_future_events_disable_pauses_queue(db, settings):
     old = ingest(db, 1)
     db.set_security_ai_auto(True, actor="admin")
     fresh = ingest(db, 2)
@@ -55,9 +55,11 @@ def test_enable_only_future_events_disable_retains_queue(db, settings):
     assert db.get_alert_analysis(fresh)["status"] == "PENDING"
     llm = FakeLLM()
     worker = AlertAnalysisWorker(db, settings, llm)
+    assert not worker.process_one()
+    assert db.get_alert_analysis(fresh)["status"] == "PENDING"
+    db.set_security_ai_auto(True, actor="admin")
     assert worker.process_one()
     assert db.get_alert_analysis(fresh)["status"] == "COMPLETED"
-    assert not worker.process_one()
     assert db.get_alert_analysis(old) is None
 
 
@@ -83,6 +85,9 @@ def test_intake_overflow_is_durable_and_every_severity_drains(db, settings):
     assert db._conn.execute("SELECT COUNT(*) FROM alert_analyses").fetchone()[0] == 2
     db.set_security_ai_auto(False, actor="admin")
     worker = AlertAnalysisWorker(db, settings, FakeLLM())
+    assert not worker.process_one()
+    assert db.analysis_summary()["paused_automatic"] == 12
+    db.set_security_ai_auto(True, actor="admin")
     for _ in range(12):
         assert worker.process_one()
     assert not worker.process_one()

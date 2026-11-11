@@ -123,7 +123,7 @@ def create_app(settings: Settings | None = None, start_monitor: bool | None = No
     if start_monitor is None:
         start_monitor = settings.enable_monitor
 
-    db = Database(settings.database_path)
+    db = Database(settings.database_path, analysis_intake_limit=settings.ai_analysis_intake_limit)
     from netagent.services.signing import initialize as initialize_signing
     initialize_signing(db, settings)
     monitor = Monitor(db, settings)

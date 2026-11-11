@@ -75,8 +75,8 @@ class LLMTruncated(LLMUnavailable):
 
 
 class LLMStructuredUnsupported(LLMUnavailable):
-    """The provider rejected ``response_format`` / json_schema (no structured
-    outputs support); callers may retry the plain call."""
+    """The provider rejected response_format; security analysis fails closed
+    rather than disabling its schema constraints."""
 
 
 _CONTEXT_MARKERS = (

@@ -5,8 +5,9 @@
  * (real record, audited); rejecting keeps history. No other path exists.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { api, ApiError } from "../lib/api";
+import { usePolling } from "../lib/polling";
 import { faNum, fmtAgo } from "../lib/format";
 import { Card, EmptyState, ErrorState, SkeletonRows } from "../components/ui";
 
@@ -51,26 +52,20 @@ export default function AIActionsPage() {
   const [busy, setBusy] = useState(false);
   const [live, setLive] = useState(true);
   const [refreshKey, setRefresh] = useState(0);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
       setError(null);
-      const d = await api.get<{ items: ActionRow[] }>("/api/admin/v1/ai-actions?limit=100");
+      const d = await api.get<{ items: ActionRow[] }>("/api/admin/v1/ai-actions?limit=100", { signal });
+      if (signal?.aborted) return;
       setItems(d.items);
     } catch (e) {
+      if (signal?.aborted) return;
       setError(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : "خطای ناشناخته");
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
-
-  useEffect(() => {
-    if (timer.current) clearInterval(timer.current);
-    if (!live) return;
-    timer.current = setInterval(() => { void load(); }, 7000);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, [live, load]);
+  usePolling(load, 7000, live, refreshKey);
 
   const decide = async (action_id: string, drop: "approve" | "reject") => {
     setBusy(true);

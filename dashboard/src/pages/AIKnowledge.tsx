@@ -7,8 +7,9 @@
  * cannot leak into decisions from this page.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../lib/api";
+import { usePolling } from "../lib/polling";
 import { faNum, fmtDateTime, fmtAgo } from "../lib/format";
 import { Card, EmptyState, ErrorState, SkeletonRows, ConfirmDialog } from "../components/ui";
 
@@ -407,31 +408,24 @@ export default function AIKnowledgePage() {
   const [category, setCategory] = useState("");
   const [live, setLive] = useState(false);
   const [refreshKey, setRefresh] = useState(0);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-  void timer;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
       setError(null);
       const qs = new URLSearchParams();
       if (status) qs.set("status", status);
       if (category) qs.set("category", category);
       qs.set("limit", "200");
-      const d = await api.get<{ items: MemoryRow[] }>(`/api/admin/v1/ai-memories?${qs.toString()}`);
+      const d = await api.get<{ items: MemoryRow[] }>(`/api/admin/v1/ai-memories?${qs.toString()}`, { signal });
+      if (signal?.aborted) return;
       setItems(d.items);
     } catch (e) {
+      if (signal?.aborted) return;
       setError(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : "خطای ناشناخته");
     }
   }, [status, category]);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
-
-  useEffect(() => {
-    if (timer.current) clearInterval(timer.current);
-    if (!live) return;
-    timer.current = setInterval(() => { void load(); }, 10000);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, [live, load]);
+  usePolling(load, 10000, live, refreshKey);
 
   const pending = (items ?? []).filter((m) => m.status === "PENDING_APPROVAL").length;
   const anyFilter = status !== "" || category !== "";

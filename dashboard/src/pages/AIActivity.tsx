@@ -6,8 +6,9 @@
  * never shown.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../lib/api";
+import { usePolling } from "../lib/polling";
 import { faNum, fmtAgo, fmtDateTime } from "../lib/format";
 import { Card, EmptyState, ErrorState, SkeletonRows } from "../components/ui";
 
@@ -290,10 +291,9 @@ export default function AIActivityPage() {
   const [status, setStatus] = useState("");
   const [taskType, setTaskType] = useState("");
   const [live, setLive] = useState(true);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [refreshKey, setRefresh] = useState(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
       setError(null);
       const qs = new URLSearchParams();
@@ -301,24 +301,19 @@ export default function AIActivityPage() {
       if (taskType) qs.set("task_type", taskType);
       qs.set("limit", "80");
       const [s, d] = await Promise.all([
-        api.get<Summary>("/api/admin/v1/ai-activity/summary"),
-        api.get<{ items: ActivityRow[] }>(`/api/admin/v1/ai-activity?${qs.toString()}`),
+        api.get<Summary>("/api/admin/v1/ai-activity/summary", { signal }),
+        api.get<{ items: ActivityRow[] }>(`/api/admin/v1/ai-activity?${qs.toString()}`, { signal }),
       ]);
+      if (signal?.aborted) return;
       setSummary(s);
       setItems(d.items);
     } catch (e) {
+      if (signal?.aborted) return;
       setError(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : "خطای ناشناخته");
     }
   }, [status, taskType]);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
-
-  useEffect(() => {
-    if (timer.current) clearInterval(timer.current);
-    if (!live) return;
-    timer.current = setInterval(() => { void load(); }, 5000);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, [live, load]);
+  usePolling(load, 5000, live, refreshKey);
 
   const anyFilter = status !== "" || taskType !== "";
 

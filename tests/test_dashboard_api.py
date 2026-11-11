@@ -83,3 +83,12 @@ def test_dashboard_spa_serving(full_client):
     # swagger untouched either way
     docs = full_client.get("/api/docs")
     assert docs.status_code == 200 and "swagger" in docs.text.lower()
+
+
+def test_dashboard_resource_settings_are_visible_without_credentials(full_client):
+    data = full_client.get("/api/dashboard/v1/settings", headers=admin_headers()).json()
+    assert data["ai_analysis_intake_limit"] == 1000
+    assert data["ai_analysis_batch_size"] == 1
+    assert data["llm_structured_outputs"] is True
+    assert "console_session_ttl_seconds" in data
+    assert not any("token" in key and key != "llm_max_output_tokens" or "signing" in key or "api_key" in key for key in data)

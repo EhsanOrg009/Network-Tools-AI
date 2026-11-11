@@ -40,7 +40,7 @@ export function RemoteConsole({ agentId, agentLabel }: Props) {
         { agent_id: agentId },
       );
       setSession(s);
-      toast.push("نشست کنسول ایجاد شد؛ مفسر روی عامل آماده است.", "success");
+      toast.push("درخواست ایجاد نشست کنسول ثبت شد.", "success");
     } catch (e) {
       setPollErr(e instanceof ApiError ? e.detail : "ایجاد نشست ناموفق بود.");
     } finally {
@@ -52,9 +52,17 @@ export function RemoteConsole({ agentId, agentLabel }: Props) {
     if (!session) return;
     try {
       await api.post(`/api/admin/v1/console/sessions/${session.id}/terminate`, {});
-    } catch { /* already gone — fine */ }
+    } catch (e) {
+      if (!(e instanceof ApiError && (e.status === 404 || e.status === 410))) {
+        const message = e instanceof ApiError ? e.detail : "بستن نشست ناموفق بود؛ دوباره تلاش کنید.";
+        setPollErr(message);
+        toast.push(message, "error");
+        return;
+      }
+    }
     setSession(null);
     setCommands([]);
+    setPollErr(null);
     toast.push("نشست کنسول بسته شد.", "info");
   }, [session, toast]);
 

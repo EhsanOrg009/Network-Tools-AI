@@ -1,0 +1,160 @@
+{
+  "timestamp": "2026-11-13T14:38:38.142Z",
+  "browser": "Chrome/157.0.8103.38",
+  "environment": "isolated synthetic evidence/model, real FastAPI and browser",
+  "results": [
+    {
+      "scenario": "login and opening Security preserve default OFF and create zero jobs",
+      "passed": true
+    },
+    {
+      "scenario": "quick navigator searches operational destinations and opens Security",
+      "passed": true
+    },
+    {
+      "scenario": "global literal search reaches an archived event beyond the first page without analysis",
+      "passed": true
+    },
+    {
+      "scenario": "manual OFF analysis processes one event, associates its result and repeated click opens accessible dialog",
+      "passed": true
+    },
+    {
+      "scenario": "UI toggle enables only fresh ingestion and OFF prevents the next automatic job",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /overview",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /security",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /agents",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /discovery",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /pending",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /investigations",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /ai-activity",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /ai-knowledge",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /ai-actions",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /settings",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /agents/agt_qa_1",
+      "passed": true
+    },
+    {
+      "scenario": "desktop navigation /agents/agt_qa_3",
+      "passed": true
+    },
+    {
+      "scenario": "every destination renders in the light theme",
+      "passed": true
+    },
+    {
+      "scenario": "every agent workspace tab opens, with an LTR console and styled input in light theme",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /overview",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /security",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /agents",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /discovery",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /pending",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /investigations",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /ai-activity",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /ai-knowledge",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /ai-actions",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /settings",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /agents/agt_qa_1",
+      "passed": true
+    },
+    {
+      "scenario": "mobile navigation /agents/agt_qa_3",
+      "passed": true
+    },
+    {
+      "scenario": "mobile drawer exposes every destination and closes after navigation",
+      "passed": true
+    },
+    {
+      "scenario": "tablet, laptop and wide desktop layouts",
+      "passed": true
+    },
+    {
+      "scenario": "manual OFF analysis and AI Activity still work after visiting Knowledge and every workspace",
+      "passed": true
+    },
+    {
+      "scenario": "Persian docs, API authentication and AI Activity remain operational",
+      "passed": true
+    },
+    {
+      "scenario": "history opens without analysis and explicit reanalysis preserves only the selected event's previous result on desktop and mobile",
+      "passed": true
+    },
+    {
+      "scenario": "every destination retains RTL layout at 320 pixels",
+      "passed": true
+    },
+    {
+      "scenario": "logout returns to the login screen",
+      "passed": true
+    }
+  ],
+  "errors": []
+}

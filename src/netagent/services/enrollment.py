@@ -66,12 +66,15 @@ class _RateLimiter:
     def allow(self, source: str) -> bool:
         now = time.monotonic()
         with self._lock:
-            if len(self._events) > self.max_sources:
-                # prune idle sources to keep memory bounded
+            if source not in self._events and len(self._events) >= self.max_sources:
                 self._events = {
                     k: v for k, v in self._events.items()
                     if v and now - v[-1] < self.window
                 }
+                # Keep live rate-limit buckets; evicting them would let a
+                # source reset its allowance by filling the table.
+                if len(self._events) >= self.max_sources:
+                    return False
             bucket = [t for t in self._events.get(source, []) if now - t < self.window]
             if len(bucket) >= self.max_events:
                 self._events[source] = bucket
@@ -84,7 +87,13 @@ class _RateLimiter:
 # ---------------------------------------------------------------------------
 
 
-def register_request(
+def register_request(db: Database, settings: Settings, **fields) -> dict[str, Any]:
+    """Serialize identity lookup, refresh and bounded admission together."""
+    with db.transaction():
+        return _register_request(db, settings, **fields)
+
+
+def _register_request(
     db: Database,
     settings: Settings,
     *,
@@ -103,18 +112,10 @@ def register_request(
     if not request_id or len(request_id) > 64 or not identity_key_hash or len(identity_key_hash) != 64:
         raise RegistrationError("درخواست ثبت‌نام نامعتبر است.")
     existing = db.get_enrollment_request_by_identity_hash(identity_key_hash)
-    # same request_id with a (re-generated) identity key: adopt the existing
-    # row instead of INSERTing — request ids are client-generated, so a
-    # conflicting re-announce must never mint a duplicate row
-    adopt_new_identity = False
-    if existing is None:
-        by_request_id = db.get_enrollment_request(request_id)
-        if by_request_id is not None:
-            existing = by_request_id
-            adopt_new_identity = True
+    by_request_id = db.get_enrollment_request(request_id)
+    if by_request_id is not None and by_request_id["identity_key_hash"] != identity_key_hash:
+        raise RegistrationError("شناسهٔ درخواست به هویت دیگری تعلق دارد؛ برای هویت جدید شناسهٔ تازه بسازید.")
     ttl_epoch = time.time() + settings.enrollment_request_ttl_minutes * 60
-    new_hash = identity_key_hash if adopt_new_identity else None
-    # (identity_key_hash from the by-hash lookup always equals the stored one)
     if existing and existing["status"] == STATUS_PENDING:
         db.refresh_enrollment_request(
             existing["id"],
@@ -125,7 +126,6 @@ def register_request(
             mac=mac,
             gateway=gateway,
             expiry_epoch=ttl_epoch,
-            identity_key_hash=new_hash,
         )
         return db.get_enrollment_request(existing["id"])  # type: ignore[return-value]
     if existing and existing["status"] in (STATUS_ENROLLED, STATUS_APPROVED):
@@ -182,7 +182,13 @@ def register_request(
     return request
 
 
-def claim_request(
+def claim_request(db: Database, settings: Settings, *, request_id: str, identity_key: str) -> dict[str, Any]:
+    """Commit issuance, request state and the enrollment audit atomically."""
+    with db.transaction():
+        return _claim_request(db, settings, request_id=request_id, identity_key=identity_key)
+
+
+def _claim_request(
     db: Database,
     settings: Settings,
     *,
@@ -199,6 +205,7 @@ def claim_request(
     ):
         raise ClaimError("کلید هویت با درخواست مطابقت ندارد.")
     db.expire_due_enrollment_requests()
+    request = db.get_enrollment_request(request_id)
     status = request["status"]
     if status == STATUS_PENDING:
         return {"status": STATUS_PENDING,

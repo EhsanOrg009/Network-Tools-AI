@@ -92,3 +92,31 @@ def test_dashboard_resource_settings_are_visible_without_credentials(full_client
     assert data["llm_structured_outputs"] is True
     assert "console_session_ttl_seconds" in data
     assert not any("token" in key and key != "llm_max_output_tokens" or "signing" in key or "api_key" in key for key in data)
+
+
+def test_overview_counts_all_hosts_agents_and_investigations(full_client, db):
+    import time
+
+    # Exceed both former list limits. Aggregate counts must cover the store,
+    # including a stale and revoked endpoint outside the first page.
+    with db.transaction():
+        for n in range(503):
+            db.create_agent(agent_id=f"overview-{n}", token_hash=f"overview-token-{n}",
+                            hostname=f"host-{n}", platform="Linux", agent_version="test",
+                            origin="test", heartbeat_interval=30, capabilities=[])
+        db._conn.execute("UPDATE endpoint_agents SET last_heartbeat_epoch=? WHERE id=?",
+                         (time.time() - 86400, "overview-501"))
+        db.revoke_agent("overview-502")
+        for n in range(3):
+            db.upsert_host(f"192.0.2.{n + 1}")
+        db._conn.executemany(
+            "INSERT INTO investigations(created_at,trigger,status) VALUES(?,?,?)",
+            [("2026-11-12T00:00:00Z", "test", "running" if n == 0 else "completed")
+             for n in range(205)],
+        )
+    data = full_client.get("/api/dashboard/v1/overview", headers=admin_headers()).json()
+    assert data["hosts"] == 3
+    assert {k: data["agents"][k] for k in ("total", "active", "stale", "revoked")} == {
+        "total": 503, "active": 501, "stale": 1, "revoked": 1,
+    }
+    assert data["investigations"] == {"total": 205, "running": 1, "completed": 204}

@@ -154,6 +154,23 @@ def test_explicit_reanalysis_archives_result_and_does_not_reset_processing(db, s
     assert db.get_alert_analysis(aid)["job_id"] == claimed["job_id"]
 
 
+def test_reanalysis_exposes_no_previous_output_in_current_job(db, settings):
+    aid = ingest(db)
+    request(db, aid)
+    assert AlertAnalysisWorker(db, settings, FakeLLM()).process_one()
+    previous = db.get_alert_analysis(aid)
+    assert previous["summary"] and previous["analyzed_at"]
+    pending = request(db, aid, reanalyze=True)
+    assert pending["status"] == "PENDING"
+    for key in ("summary", "importance", "evidence", "anomaly_likelihood", "confidence",
+                "recommendation", "model", "prompt_version", "duration_ms", "analyzed_at"):
+        assert pending.get(key) is None, key
+    assert pending["memories_used"] == []
+    assert db.analysis_summary()["last_processed_at"] is None
+    history = db.alert_analysis_history(aid)
+    assert history == [previous]
+
+
 def test_queue_capacity_rejects_new_manual_but_returns_existing(db):
     a, b = ingest(db, 1), ingest(db, 2)
     existing = db.request_alert_analysis(a, actor="admin", capacity=1)

@@ -96,7 +96,13 @@ def generate_agent_id(db: Database) -> str:
             return candidate
 
 
-def enroll_agent(
+def enroll_agent(db: Database, settings: Settings, req: EnrollRequest, *, origin: str | None = None) -> tuple[dict[str, Any], str]:
+    """Token consumption and permanent identity creation share one commit."""
+    with db.transaction():
+        return _enroll_agent(db, settings, req, origin=origin)
+
+
+def _enroll_agent(
     db: Database,
     settings: Settings,
     req: EnrollRequest,

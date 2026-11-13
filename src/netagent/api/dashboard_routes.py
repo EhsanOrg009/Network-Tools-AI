@@ -17,7 +17,6 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from netagent.api.admin_routes import _ctx, _guard
-from netagent.services.agents import agent_public_view
 
 router = APIRouter(prefix="/api/dashboard/v1", tags=["داشبورد مدیریتی"])
 
@@ -101,29 +100,13 @@ def overview(
     _guard(request, authorization, x_admin_actor)
     db, settings = _ctx(request)
 
-    agents = [
-        agent_public_view(a, settings)
-        for a in db.list_agents(limit=500, include_revoked=True)
-    ]
-    by_state = {"total": len(agents), "active": 0, "stale": 0, "revoked": 0}
-    for a in agents:
-        by_state[a["status"]] = by_state.get(a["status"], 0) + 1
-
     day_epoch = time.time() - 86400
-    _, alerts_total = db.query_alerts(limit=1)
     _, alerts_24h = db.query_alerts(since_epoch=day_epoch, limit=1)
-    _, events_total = db.query_events(limit=1)
     _, events_24h = db.query_events(since_epoch=day_epoch, limit=1)
-    hosts_total = len(db.list_hosts(limit=1, offset=0))
     stats = db.stats()
-
-    investigations = db.list_investigations(limit=200)
-    inv_counts: dict[str, int] = {"total": len(investigations)}
-    for inv in investigations:
-        s = inv.get("status") or "unknown"
-        inv_counts[s] = inv_counts.get(s, 0) + 1
-
-    pending_requests, pending_total = db.list_enrollment_requests(status="PENDING_APPROVAL")
+    by_state = db.agent_status_counts(stale_before_epoch=settings.agent_stale_threshold_epoch())
+    inv_counts = db.investigation_status_counts()
+    pending_requests, pending_total = db.list_enrollment_requests(status="PENDING_APPROVAL", limit=5)
     recent_audit, _ = db.list_audit(limit=12)
 
     return {
@@ -132,10 +115,10 @@ def overview(
             "pending_approval": int(pending_total),
             "pending_requests": pending_requests[:5],
         },
-        "hosts": hosts_total,
-        "events": {"total": events_total, "last_24h": events_24h},
+        "hosts": stats["hosts"],
+        "events": {"total": stats["events"], "last_24h": events_24h},
         "alerts": {
-            "total": alerts_total,
+            "total": stats["alerts"],
             "last_24h": alerts_24h,
             "by_severity": db.alert_severity_counts(),
         },

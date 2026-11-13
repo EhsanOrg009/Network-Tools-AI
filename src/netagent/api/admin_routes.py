@@ -361,12 +361,13 @@ def approve_enrollment_request(
 ) -> dict[str, Any]:
     db, _ = _ctx(request)
     actor = _guard(request, authorization, x_admin_actor)
-    reviewed = db.review_enrollment_request(request_id, approve=True, reviewed_by=actor)
-    if reviewed is None:
-        raise HTTPException(status_code=409,
-                            detail="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.")
-    db.record_audit(actor=actor, action="enrollment_request.approve", target=request_id,
-                    detail={"hostname": reviewed.get("hostname")})
+    with db.transaction():
+        reviewed = db.review_enrollment_request(request_id, approve=True, reviewed_by=actor)
+        if reviewed is None:
+            raise HTTPException(status_code=409,
+                                detail="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.")
+        db.record_audit(actor=actor, action="enrollment_request.approve", target=request_id,
+                        detail={"hostname": reviewed.get("hostname")})
     return reviewed
 
 
@@ -410,13 +411,14 @@ def reject_enrollment_request(
 ) -> dict[str, Any]:
     db, _ = _ctx(request)
     actor = _guard(request, authorization, x_admin_actor)
-    reviewed = db.review_enrollment_request(request_id, approve=False, reviewed_by=actor,
-                                            reason=body.reason)
-    if reviewed is None:
-        raise HTTPException(status_code=409,
-                            detail="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.")
-    db.record_audit(actor=actor, action="enrollment_request.reject", target=request_id,
-                    detail={"hostname": reviewed.get("hostname"), "reason": body.reason})
+    with db.transaction():
+        reviewed = db.review_enrollment_request(request_id, approve=False, reviewed_by=actor,
+                                                reason=body.reason)
+        if reviewed is None:
+            raise HTTPException(status_code=409,
+                                detail="درخواست یافت نشد یا در وضعیت قابل بررسی نیست.")
+        db.record_audit(actor=actor, action="enrollment_request.reject", target=request_id,
+                        detail={"hostname": reviewed.get("hostname"), "reason": body.reason})
     return reviewed
 
 

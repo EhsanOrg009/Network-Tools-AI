@@ -71,18 +71,16 @@ def test_announce_creates_pending_request(full_client):
 
 def test_re_announce_updates_existing_request_not_creating_endless_rows(full_client, db):
     rid = _request_id()
-    _announce(full_client, request_id=rid)
-    _announce(full_client, request_id=rid)
-    import hashlib, secrets as s
-    h2, _ = _identity_hash()
+    body, _, key = _announce(full_client, request_id=rid)
+    _announce(full_client, request_id=rid, identity_key=key)
     r = full_client.post("/api/agent/v1/register", json={
-        "request_id": rid, "identity_key_hash": h2, "hostname": "renamed-ws"})
+        "request_id": rid, "identity_key_hash": body["identity_key_hash"], "hostname": "renamed-ws"})
     assert r.status_code == 200
     item = db.get_enrollment_request(rid)
     assert item["hostname"] == "renamed-ws"
     # dedupe is driven by identity hash: the earlier registration updates in place
     items, total = db.list_enrollment_requests(status="PENDING_APPROVAL")
-    assert total >= 1
+    assert total == 1
 
 
 def test_admin_sees_pending_request_in_list(full_client):

@@ -1222,6 +1222,32 @@ class Database:
 
     # -- dashboard aggregates (read-only) ------------------------------------
 
+    def agent_status_counts(self, *, stale_before_epoch: float) -> dict[str, int]:
+        """Count every endpoint without loading credentials or paginated rows."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT CASE
+                    WHEN status = 'revoked' THEN 'revoked'
+                    WHEN last_heartbeat_epoch IS NULL OR last_heartbeat_epoch = 0
+                         OR last_heartbeat_epoch < ? THEN 'stale'
+                    ELSE 'active' END AS state, COUNT(*) AS c
+                FROM endpoint_agents GROUP BY state
+                """, (stale_before_epoch,),
+            ).fetchall()
+        counts = {"active": 0, "stale": 0, "revoked": 0}
+        counts.update({r["state"]: int(r["c"]) for r in rows})
+        return {"total": sum(counts.values()), **counts}
+
+    def investigation_status_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT COALESCE(status, 'unknown') AS state, COUNT(*) AS c "
+                "FROM investigations GROUP BY state"
+            ).fetchall()
+        counts = {r["state"]: int(r["c"]) for r in rows}
+        return {"total": sum(counts.values()), **counts}
+
     def alert_severity_counts(self, since_epoch: float | None = None) -> list[dict[str, Any]]:
         """Alerts grouped by Suricata severity (1=fundamental … 4=low)."""
         cond, params = "", []
@@ -1997,9 +2023,10 @@ class Database:
                 """
                 UPDATE enrollment_requests SET status = ?, reviewed_by = ?,
                        reviewed_at = ?, reject_reason = ?, updated_at = ?
-                WHERE id = ? AND status = 'PENDING_APPROVAL'
+                WHERE id = ? AND status = 'PENDING_APPROVAL' AND expiry_epoch >= ?
                 """,
-                (status, reviewed_by, now, None if approve else (reason or None), now, request_id),
+                (status, reviewed_by, now, None if approve else (reason or None), now, request_id,
+                 datetime.now(timezone.utc).timestamp()),
             )
             self._commit()
         if cur.rowcount != 1:
@@ -2629,6 +2656,10 @@ class Database:
                 """
                 UPDATE alert_analyses SET status = 'PENDING', error = NULL,
                        attempts = 0, started_at = NULL, batch_id = NULL, origin='manual',
+                       summary = NULL, importance = NULL, evidence_json = NULL,
+                       anomaly_likelihood = NULL, confidence = NULL, recommendation = NULL,
+                       model = NULL, prompt_version = NULL, duration_ms = NULL,
+                       analyzed_at = NULL, memories_json = '[]',
                        job_id=?, next_retry_epoch=0, provider_failures=0, created_at=?
                 WHERE alert_id = ?
                 """,

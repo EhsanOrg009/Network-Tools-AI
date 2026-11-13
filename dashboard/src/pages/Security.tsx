@@ -9,7 +9,8 @@ import { api, ApiError } from "../lib/api";
 import type { AlertRow } from "../lib/types";
 import { faNum, fmtAgo, fmtDateTime, severityLabel } from "../lib/format";
 import { Card, Dialog, EmptyState, ErrorState, MiniSpinner, SkeletonRows, TechChip } from "../components/ui";
-import { BarList, CHART_COLORS } from "../components/charts";
+import { CHART_COLORS } from "../components/charts";
+import AnalysisHistory from "../components/AnalysisHistory";
 import { IconShield, IconAlert } from "../components/icons";
 
 export interface AlertAnalysisRow {
@@ -104,6 +105,7 @@ export default function SecurityPage() {
   const [aiError, setAIError] = useState<string | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionEventId, setActionEventId] = useState<number | null>(null);
   const [page, setPage] = useState(0);
   const [backlogPolicy, setBacklogPolicy] = useState<"future_only" | "recent_unprocessed">("future_only");
   const [backlogLimit, setBacklogLimit] = useState(50);
@@ -189,6 +191,7 @@ export default function SecurityPage() {
     if (!aiStatus || autoBusy) return;
     setAutoBusy(true);
     setActionError(null);
+    setActionEventId(null);
     try {
       await api.put("/api/admin/v1/security-ai/automatic", { enabled: !aiStatus.auto_enabled,
         backlog_policy: backlogPolicy, backlog_limit: backlogLimit });
@@ -203,6 +206,7 @@ export default function SecurityPage() {
     actionInFlight.current = true;
     setBusy(alertId);
     setActionError(null);
+    setActionEventId(alertId);
     try {
       await api.post(`/api/admin/v1/ai-analyses/${alertId}/analyze`);
       await load();
@@ -216,6 +220,7 @@ export default function SecurityPage() {
     actionInFlight.current = true;
     setBusy(alertId);
     setActionError(null);
+    setActionEventId(alertId);
     try {
       await api.post(`/api/admin/v1/ai-analyses/${alertId}/reanalyze`);
       await load();
@@ -293,7 +298,9 @@ export default function SecurityPage() {
               ورودی خودکار به سقف ظرفیت رسیده است. هشدارهای بعدی ذخیره می‌شوند و برای تحلیل تکی یا انتخاب محدود تاریخچه در دسترس‌اند.
             </p>}
           </>}
-          {(aiError || actionError) && <div className="login-error" role="alert">{actionError || aiError}</div>}
+          {(aiError || actionError) && <div className="login-error" role="alert">
+            {actionError && actionEventId !== null && <b>هشدار #{faNum(actionEventId)}: </b>}<span>{actionError || aiError}</span>
+          </div>}
         </div>
       </section>
       <div className="security-evidence-note">
@@ -334,21 +341,17 @@ export default function SecurityPage() {
         </div>
       </div>
 
-      <div className="grid-half" style={{ marginBottom: 14 }}>
-        <Card title="تفکیک شدت — تمام نتایج فیلتر">
-          <BarList items={bySev} />
-        </Card>
-        <div className="card card-pad" style={{ display: "grid", placeItems: "center" }}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 34, fontWeight: 800 }}>{faNum(total)}</div>
-            <div className="small muted">هشدار مطابق فیلتر فعلی ({sev === "all" ? "همه" : severityLabel(Number(sev))}) در پایگاه‌داده</div>
-            <div className="small muted" style={{ marginTop: 6 }}>
-              تحلیل‌شده: {faNum([...analyses.values()].filter((a) => a.status === "COMPLETED").length)} ·
-              در صف این صفحه: {faNum([...analyses.values()].filter((a) => a.status === "PENDING").length)}
-            </div>
-          </div>
+      <section className="card security-summary" aria-label="تفکیک شدت نتایج فیلتر">
+        <div className="security-result-total"><strong>{faNum(total)}</strong><span>هشدار مطابق فیلتر</span>
+          <small className="muted">در تمام پایگاه داده</small></div>
+        <div className="severity-strip">
+          {bySev.map((item) => <div className="severity-metric" key={item.label}>
+            <div><span className="severity-dot" style={{ background: item.color }} /><span>{item.label}</span><b>{faNum(item.value)}</b></div>
+            <div className="severity-track"><span style={{ background: item.color, width: `${total ? item.value / total * 100 : 0}%` }} /></div>
+          </div>)}
+          {!bySev.length && <span className="small muted">داده‌ای برای تفکیک شدت موجود نیست.</span>}
         </div>
-      </div>
+      </section>
 
       <Card pad={false} title="هشدارهای امنیتی"
         extra={<span className="badge badge-muted">{faNum(filtered.length)} نمایش‌داده‌شده از {faNum(total)}</span>}>
@@ -417,7 +420,20 @@ export default function SecurityPage() {
               <span className={`badge ${detail.severity <= 2 ? "badge-danger" : "badge-muted"}`}>{severityLabel(detail.severity)}</span>
             </div>
 
-            {actionError && <div className="login-error" role="alert" style={{ marginBottom: 12 }}>{actionError}</div>}
+            <div className="event-context">
+              <div className="event-signature"><span className="field-label">امضای رویداد</span><bdi>{detail.signature ?? "امضایی ثبت نشده"}</bdi></div>
+              <div className="event-route-cards">
+                <div><span className="field-label">مبدأ</span><bdi>{detail.src_ip ?? "نامشخص"}</bdi><small>پورت {detail.src_port ?? "—"}</small></div>
+                <span className="event-route-arrow" aria-hidden="true">←</span>
+                <div><span className="field-label">مقصد</span><bdi>{detail.dest_ip ?? "نامشخص"}</bdi><small>پورت {detail.dest_port ?? "—"}</small></div>
+              </div>
+              <dl className="event-facts">
+                <div><dt>زمان دریافت</dt><dd>{fmtDateTime(detail.ts)}</dd></div>
+                <div><dt>پروتکل</dt><dd><bdi>{[detail.proto, detail.app_proto].filter(Boolean).join(" / ") || "نامشخص"}</bdi></dd></div>
+                <div><dt>اقدام حسگر</dt><dd><bdi>{detail.action ?? "نامشخص"}</bdi></dd></div>
+              </dl>
+            </div>
+            {actionError && actionEventId === detail.id && <div className="login-error" role="alert" style={{ marginBottom: 12 }}>{actionError}</div>}
             {detailAnalysis && !aiError && (
               <div className="card card-pad" style={{ background: "var(--bg-card-2)", marginBottom: 12 }}>
                 <div className="row" style={{ gap: 8, marginBottom: 8 }}>
@@ -474,8 +490,10 @@ export default function SecurityPage() {
             </button>}
             {aiError && <div className="login-error" role="alert">وضعیت تحلیل قابل دریافت نیست: {aiError}</div>}
 
-            <div className="small muted" style={{ marginBottom: 4 }}>شواهد خام Suricata:</div>
-            <pre className="code-block" style={{ maxHeight: 280 }}>{JSON.stringify(detail, null, 2)}</pre>
+            <AnalysisHistory key={detail.id} alertId={detail.id} jobId={detailAnalysis?.job_id} />
+            <details className="event-raw"><summary>شواهد خام Suricata</summary>
+              <pre className="code-block" style={{ maxHeight: 280 }}>{JSON.stringify(detail, null, 2)}</pre>
+            </details>
             <div className="row" style={{ marginTop: 14 }}>
               <TechChip>{`alert_id=${detail.id}`}</TechChip>
               <div className="spacer" />

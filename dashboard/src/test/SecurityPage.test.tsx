@@ -46,6 +46,22 @@ function renderPage() {
 }
 
 describe("SecurityPage AI analysis", () => {
+  it("does not attribute a selected request's error to another event", async () => {
+    mockedApi.get.mockImplementation(async (path) => {
+      if (path.startsWith("/api/alerts")) return { ...ALERTS, items: [ALERT, { ...ALERT, id: 35, signature: "Other event" }], total: 2 };
+      if (path === "/api/admin/v1/security-ai") return STATUS;
+      return { items: [] };
+    });
+    mockedApi.post.mockRejectedValue(new apiModule.ApiError(429, "خطای درخواست انتخاب‌شده"));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "تحلیل با هوش مصنوعی هشدار 34" }));
+    await screen.findByText("خطای درخواست انتخاب‌شده");
+    fireEvent.click(screen.getByText("Other event"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByText("خطای درخواست انتخاب‌شده")).not.toBeInTheDocument();
+    expect(mockedApi.post).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the completed analysis summary in the AI column", async () => {
     mockBackend({
       analyses: [{

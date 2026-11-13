@@ -30,59 +30,75 @@ function NewInvestigationPanel({ onStarted }: { onStarted: (invId: number | null
   const [runPing, setRunPing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobState | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [suggestionRefresh, setSuggestionRefresh] = useState(0);
+  const requestInFlight = useRef(false);
+  const onStartedRef = useRef(onStarted);
+  useEffect(() => { onStartedRef.current = onStarted; }, [onStarted]);
 
   useEffect(() => {
-    if (!open || hosts !== null) return;
+    if (!open) return;
+    const controller = new AbortController();
+    setSuggestionError(null);
     void (async () => {
       try {
         const [h, a] = await Promise.all([
-          api.get<{ items?: HostRow[] }>("/api/hosts?limit=100").catch(() => ({ items: [] })),
-          api.get<{ items?: AgentSummary[] }>("/api/admin/v1/agents?limit=100")
-            .catch(() => ({ items: [] })),
+          api.get<{ items: HostRow[] }>("/api/hosts?limit=100", { signal: controller.signal }),
+          api.get<{ items: AgentSummary[] }>("/api/admin/v1/agents?limit=100", { signal: controller.signal }),
         ]);
-        setHosts(Array.isArray(h.items) ? h.items : []);
-        setAgents(Array.isArray(a.items) ? a.items : []);
-      } catch {
-        setHosts([]);
-        setAgents([]);
+        if (controller.signal.aborted) return;
+        if (!Array.isArray(h.items) || !Array.isArray(a.items)) throw new Error("پاسخ فهرست هدف‌ها معتبر نیست.");
+        setHosts(h.items);
+        setAgents(a.items);
+      } catch (e) {
+        if (!controller.signal.aborted) setSuggestionError(e instanceof Error ? e.message : "دریافت فهرست هدف‌ها ناموفق بود.");
       }
     })();
-  }, [open, hosts]);
-
-  useEffect(() => () => { if (pollTimer.current) clearTimeout(pollTimer.current); }, []);
+    return () => controller.abort();
+  }, [open, suggestionRefresh]);
 
   const showError = (e: unknown) =>
     setError(e instanceof ApiError ? e.detail : e instanceof Error ? e.message : "خطای ناشناخته");
 
-  const trackJob = useCallback((jobId: string) => {
+  useEffect(() => {
+    if (!jobId) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
       try {
-        const st = await api.get<JobState & { id: string }>(`/api/jobs/${jobId}`);
+        const st = await api.get<JobState>(`/api/jobs/${jobId}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
         setJob({ status: st.status, error: st.error ?? null });
-        if (st.status === "completed" || st.status === "failed") {
+        if (["completed", "failed", "cancelled", "interrupted"].includes(st.status)) {
           setBusy(false);
-          onStarted(null);
+          setJobId(null);
+          onStartedRef.current(null);
           return;
         }
-        pollTimer.current = setTimeout(tick, 3000);
+        if (st.status !== "queued" && st.status !== "running") throw new Error("وضعیت کار پس‌زمینه معتبر نیست.");
+        timer = setTimeout(() => { void tick(); }, 3000);
       } catch (e) {
+        if (controller.signal.aborted) return;
         setBusy(false);
+        setJobId(null);
         showError(e);
       }
     };
     void tick();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onStarted]);
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [jobId]);
 
   const start = useCallback(async () => {
+    if (busy || requestInFlight.current) return;
     const trimmed = target.trim();
     if (!trimmed) {
       setError("هدف را انتخاب یا وارد کنید.");
       return;
     }
     setBusy(true);
+    requestInFlight.current = true;
     setError(null);
     setJob(null);
     const body: Record<string, unknown> = {
@@ -93,17 +109,17 @@ function NewInvestigationPanel({ onStarted }: { onStarted: (invId: number | null
     try {
       if (mode === "quick") {
         const inv = await api.post<Investigation>("/api/investigations", body);
-        onStarted(inv.id ?? null);
+        setBusy(false);
+        onStartedRef.current(inv.id ?? null);
       } else {
         const res = await api.post<{ job_id: string }>("/api/jobs/investigation", body);
-        trackJob(res.job_id);
+        setJobId(res.job_id);
       }
     } catch (e) {
       setBusy(false);
       showError(e);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, question, mode, runPing, onStarted, trackJob]);
+    } finally { requestInFlight.current = false; }
+  }, [target, question, mode, runPing, busy]);
 
   const targetSuggestions = useMemo(() => {
     const set = new Set<string>();
@@ -171,6 +187,11 @@ function NewInvestigationPanel({ onStarted }: { onStarted: (invId: number | null
         </div>
       </div>
 
+      {suggestionError && <div className="login-error" role="alert">
+        {suggestionError}؛ هدف را می‌توانید مستقیم وارد کنید.
+        <button className="btn sm" onClick={() => setSuggestionRefresh((k) => k + 1)}>تلاش دوباره برای فهرست هدف‌ها</button>
+      </div>}
+
       <div className="row wrap" style={{ gap: 14, marginTop: 12 }}>
         <label className="row small" style={{ gap: 6 }}>
           <input type="radio" checked={mode === "quick"} onChange={() => setMode("quick")} />
@@ -194,9 +215,7 @@ function NewInvestigationPanel({ onStarted }: { onStarted: (invId: number | null
       {job && (
         <div className="small" style={{ marginTop: 10 }}>
           وضعیت کار پس‌زمینه:{" "}
-          <span className={`badge ${job.status === "completed" ? "badge-ok" : job.status === "failed" ? "badge-danger" : "badge-accent"}`}>
-            {job.status}
-          </span>
+          <StatusPill state={job.status} />
           {job.error && <span style={{ color: "var(--danger)" }}> — {job.error}</span>}
         </div>
       )}

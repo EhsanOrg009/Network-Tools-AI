@@ -117,7 +117,7 @@ def _enroll_agent(
 
     agent_id = generate_agent_id(db)
     static_token = (settings.agent_enrollment_token or "").strip()
-    if static_token and hmac.compare_digest(presented, static_token):
+    if static_token and hmac.compare_digest(presented.encode("utf-8"), static_token.encode("utf-8")):
         pass  # static bootstrap token from settings: valid, reusable
     else:
         token_hash = hash_secret(presented)

@@ -13,8 +13,9 @@
  * never from string prefixes.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
+import { usePolling } from "../lib/polling";
 import { ipInCidr, isValidCidr } from "../lib/cidr";
 import { parseNetworksResponse } from "../lib/validate";
 import type { AgentSummary, EffectiveDiscoveryScope, HostRow, NetworkObservationRow } from "../lib/types";
@@ -35,19 +36,22 @@ export default function DiscoveryPage() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefresh] = useState(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     setError(null);
     try {
       const [net, h, a] = await Promise.all([
-        api.get<unknown>("/api/admin/v1/networks?limit=200"),
-        api.get<{ items?: HostRow[] }>("/api/hosts?limit=200").catch(() => null),
-        api.get<{ items?: AgentSummary[] }>("/api/admin/v1/agents?limit=200"),
+        api.get<unknown>("/api/admin/v1/networks?limit=200", { signal }),
+        api.get<{ items: HostRow[] }>("/api/hosts?limit=200", { signal }),
+        api.get<{ items: AgentSummary[] }>("/api/admin/v1/agents?limit=200", { signal }),
       ]);
+      if (signal.aborted) return;
       const parsed = parseNetworksResponse(net); // throws on shape mismatch
+      if (!Array.isArray(h.items) || !Array.isArray(a.items)) throw new Error("پاسخ میزبان‌ها یا عامل‌ها معتبر نیست.");
       setData({ observations: parsed.observations, scope: parsed.effective_scope });
-      setHosts(Array.isArray(h?.items) ? h!.items! : []);
-      setAgents(Array.isArray(a?.items) ? a!.items! : []);
+      setHosts(h.items);
+      setAgents(a.items);
     } catch (e) {
+      if (signal.aborted) return;
       setError(
         e instanceof ApiError ? e.detail
         : e instanceof Error ? e.message
@@ -56,7 +60,7 @@ export default function DiscoveryPage() {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
+  usePolling(load, 0, false, refreshKey);
 
   const filteredHosts = useMemo(() => {
     const needle = q.trim().toLowerCase();

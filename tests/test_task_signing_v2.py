@@ -51,6 +51,13 @@ def test_tampered_task_is_rejected(secure_settings, field):
     assert not verify_envelope(task, key, "agent-a")[0]
 
 
+def test_non_ascii_task_signature_is_rejected_without_crashing(secure_settings):
+    task = message(secure_settings)
+    task["envelope"]["signature"] = "امضای نامعتبر"
+    key = signing.agent_key(secure_settings, "agent-a")
+    assert verify_envelope(task, key, "agent-a") == (False, "bad signature")
+
+
 def test_expiry_replay_and_downgrade(secure_settings):
     task = message(secure_settings)
     key = signing.agent_key(secure_settings, "agent-a")

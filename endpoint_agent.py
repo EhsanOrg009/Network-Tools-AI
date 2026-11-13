@@ -344,7 +344,7 @@ def verify_envelope(message: dict, master_key: str, agent_id: str,
     if not isinstance(signature, str):
         return False, "invalid signature type"
     expected = hmac.new(key.encode(), _canonical(payload), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    if not signature.isascii() or not hmac.compare_digest(signature, expected):
         return False, "bad signature"
     if payload["agent_id"] != agent_id:
         return False, "envelope addressed to another agent"

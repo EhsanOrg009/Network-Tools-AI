@@ -20,11 +20,13 @@ def protected_routes(app):
             yield route
 
 
-@pytest.mark.parametrize("identity", ["missing", "invalid", "agent"])
+@pytest.mark.parametrize("identity", ["missing", "invalid", "non_ascii", "agent"])
 def test_all_protected_routes_reject_non_admin(full_client, identity):
     headers = {}
     if identity == "invalid":
         headers = agent_headers("invalid-token")
+    elif identity == "non_ascii":
+        headers = {b"Authorization": b"Bearer invalid-\xff"}
     elif identity == "agent":
         _, token = enroll(full_client)
         headers = agent_headers(token)

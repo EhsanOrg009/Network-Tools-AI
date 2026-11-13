@@ -88,11 +88,12 @@ export function stateLabel(state: string | null | undefined): { label: string; t
     case "ENROLLED": return { label: "تکمیل‌شده", tone: "ok" };
     case "REJECTED": return { label: "ردشده", tone: "danger" };
     case "EXPIRED": return { label: "منقضی", tone: "muted" };
-    case "pending": return { label: "در صف", tone: "warn" };
-    case "dispatched": return { label: "در حال اجرا", tone: "accent" };
-    case "succeeded": return { label: "موفق", tone: "ok" };
+    case "pending": case "queued": return { label: "در صف", tone: "warn" };
+    case "dispatched": case "running": return { label: "در حال اجرا", tone: "accent" };
+    case "succeeded": case "completed": return { label: "موفق", tone: "ok" };
     case "failed": case "error": return { label: "ناموفق", tone: "danger" };
     case "cancelled": return { label: "لغوشده", tone: "muted" };
+    case "interrupted": return { label: "متوقف‌شده", tone: "warn" };
     default: return { label: state || "نامشخص", tone: "muted" };
   }
 }

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { Mocked } from "vitest";
 import DiscoveryPage from "../pages/Discovery";
@@ -48,6 +48,21 @@ beforeEach(() => {
 });
 
 describe("DiscoveryPage", () => {
+  it("reports failed host loading rather than displaying an empty topology and retries", async () => {
+    const original = mockedApi.get.getMockImplementation()!;
+    mockedApi.get.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/hosts")) throw new apiModule.ApiError(503, "فهرست میزبان‌ها در دسترس نیست");
+      return original(path, options);
+    });
+    renderPage();
+    await screen.findByText("فهرست میزبان‌ها در دسترس نیست");
+    expect(screen.queryByText("شبکه‌ای ثبت نشده")).not.toBeInTheDocument();
+    mockedApi.get.mockImplementation(original);
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await screen.findByText("شبکه‌ای ثبت نشده");
+    expect(mockedApi.post).not.toHaveBeenCalled();
+  });
+
   it("renders the empty state when observations are empty (scenario 1)", async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("شبکه‌ای ثبت نشده")).toBeInTheDocument());

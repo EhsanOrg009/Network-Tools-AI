@@ -53,6 +53,13 @@ def test_enroll_with_static_bootstrap_token(full_client, secure_settings):
     assert agent_token not in repr(db_token_hash_is_present(full_client, agent_id, agent_token))
 
 
+def test_static_enrollment_rejects_non_ascii_bad_tokens(full_client, secure_settings):
+    secure_settings.agent_enrollment_token = "static-bootstrap-secret"
+    for token in ("توکن نامعتبر", "invalid-é"):
+        response = full_client.post("/api/agent/v1/enroll", json={"enrollment_token": token})
+        assert response.status_code == 403
+
+
 def db_token_hash_is_present(full_client, agent_id, agent_token):
     """The stored credential is a SHA-256 hash, never the plaintext token."""
     agent = full_client.app.state.db.get_agent(agent_id)

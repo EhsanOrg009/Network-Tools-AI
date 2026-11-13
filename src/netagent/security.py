@@ -37,7 +37,7 @@ def secret_matches(secret: str, stored_hash: str) -> bool:
     """Constant-time verification of a secret against its stored hash."""
     if not secret or not stored_hash:
         return False
-    return hmac.compare_digest(hash_secret(secret), stored_hash)
+    return hmac.compare_digest(hash_secret(secret).encode("utf-8"), stored_hash.encode("utf-8"))
 
 
 def admin_token_configured(raw_token: str | None, hashed_token: str | None) -> bool:
@@ -63,7 +63,9 @@ def verify_admin_token(presented: str, raw_token: str | None, hashed_token: str 
         expected = raw_token.strip()
         if len(expected) < MIN_ADMIN_TOKEN_LEN:
             return False
-        return hmac.compare_digest(presented, expected)
+        # HTTP credentials are untrusted text; compare_digest(str, str)
+        # raises TypeError for non-ASCII instead of rejecting the token.
+        return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
     return False
 
 
@@ -80,7 +82,7 @@ def sign_task(payload: dict[str, Any], key: str) -> str:
 
 
 def verify_task_signature(payload: dict[str, Any], key: str, signature: str) -> bool:
-    if not key or not signature:
+    if not key or not signature or not signature.isascii():
         return False
     try:
         expected = sign_task(payload, key)

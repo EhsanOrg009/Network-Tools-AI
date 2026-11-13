@@ -144,3 +144,36 @@ def test_backlog_contract_and_validation(ai_client, db):
         assert ai_client.put(endpoint, json=body, headers=h).status_code == 422
     assert ai_client.put(endpoint, json={"enabled": True, "backlog_policy": "recent_unprocessed", "backlog_limit": 1}, headers=h).status_code == 200
     assert db.pending_alert_analysis_count() == 1
+
+
+@pytest.mark.parametrize("saved_policy,saved_limit", [(None, None), ("recent_unprocessed", 7)])
+def test_backlog_migration_preserves_admin_mode_results_and_optional_settings(tmp_path, monkeypatch, settings, saved_policy, saved_limit):
+    from netagent.database import Database
+    from netagent.migrations import MIGRATIONS
+    path = tmp_path / "before-backlog-policy.sqlite3"
+    with monkeypatch.context() as context:
+        context.delitem(MIGRATIONS, "004_security_ai_backlog_policy")
+        old = Database(path)
+        first, second = ingest(old, 1), ingest(old, 2)
+        row = request(old, first)
+        assert AlertAnalysisWorker(old, settings, FakeLLM()).process_one()
+        old.set_security_ai_auto(True, actor="admin")
+        if saved_policy is not None:
+            old.set_meta("security_ai_backlog_policy", saved_policy)
+            old.set_meta("security_ai_backlog_limit", str(saved_limit))
+        old.close()
+    for _ in range(2):
+        upgraded = Database(path)
+        try:
+            assert upgraded.get_meta("migration:004_security_ai_backlog_policy") == "applied"
+            assert upgraded.security_ai_auto_enabled()
+            summary = upgraded.analysis_summary()
+            assert summary["backlog_policy"] == (saved_policy or "future_only")
+            assert summary["backlog_limit"] == (saved_limit or 50)
+            result = upgraded.get_alert_analysis(first)
+            assert result["job_id"] == row["job_id"] and result["status"] == "COMPLETED"
+            assert result["summary"]
+            assert upgraded.get_alert_analysis(second) is None
+            assert upgraded.query_alerts()[1] == 2
+        finally:
+            upgraded.close()

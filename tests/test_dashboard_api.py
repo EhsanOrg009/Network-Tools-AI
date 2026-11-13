@@ -120,3 +120,17 @@ def test_overview_counts_all_hosts_agents_and_investigations(full_client, db):
         "total": 503, "active": 501, "stale": 1, "revoked": 1,
     }
     assert data["investigations"] == {"total": 205, "running": 1, "completed": 204}
+
+
+def test_daily_trend_counts_events_and_alerts_under_the_api_series_names(full_client, db):
+    from datetime import datetime, timezone
+    from tests.test_security_ai_controls import ingest
+    alert = ingest(db)
+    stamp = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() + 1
+    with db.transaction():
+        db._conn.execute("UPDATE alerts SET ts_epoch=? WHERE id=?", (stamp, alert))
+        db._conn.execute("UPDATE events SET ts_epoch=?", (stamp,))
+    data = full_client.get("/api/dashboard/v1/overview", headers=admin_headers()).json()
+    today = data["trend_7d"][-1]
+    assert today["events"] == 1 and today["alerts"] == 1
+    assert set(today) == {"date", "events", "alerts", "audit"}

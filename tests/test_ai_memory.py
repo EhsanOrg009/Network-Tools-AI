@@ -260,3 +260,15 @@ def test_admin_approve_revoke_and_rate_limit_paths(mem_client, db):
         headers=admin_headers(),
     )
     assert r.status_code == 422
+def test_listing_knowledge_does_not_leave_a_transaction_that_blocks_security(db, settings):
+    from netagent.services.ai_analysis import AlertAnalysisWorker
+    from tests.test_ai_analysis import FakeLLM
+    from tests.test_security_ai_controls import ingest, request
+    selected = ingest(db)
+    assert db.list_memories() == []
+    row = request(db, selected)
+    assert AlertAnalysisWorker(db, settings, FakeLLM()).process_one()
+    assert db.get_alert_analysis(selected)["job_id"] == row["job_id"]
+    assert db.get_alert_analysis(selected)["status"] == "COMPLETED"
+
+

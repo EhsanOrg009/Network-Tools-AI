@@ -760,6 +760,39 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows], int(total)
 
+    @staticmethod
+    def _alert_filters(
+        *, ip=None, severity=None, signature_id=None, since_epoch=None,
+        until_epoch=None, q=None, analysis_status=None,
+    ) -> tuple[str, list[Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if ip:
+            where.append("(src_ip = ? OR dest_ip = ?)")
+            params.extend([ip, ip])
+        for column, value, operator in (("severity", severity, "="), ("signature_id", signature_id, "="),
+                                         ("ts_epoch", since_epoch, ">="), ("ts_epoch", until_epoch, "<=")):
+            if value is not None:
+                where.append(f"{column} {operator} ?")
+                params.append(value)
+        if q and q.strip():
+            # Literal substring search: %, _ and SQL-looking text remain data.
+            where.append("(instr(lower(COALESCE(signature,'')),lower(?)) > 0 "
+                         "OR instr(COALESCE(src_ip,''),?) > 0 OR instr(COALESCE(dest_ip,''),?) > 0)")
+            params.extend([q.strip()] * 3)
+        if analysis_status == "none":
+            where.append("NOT EXISTS(SELECT 1 FROM alert_analyses a WHERE a.alert_id=alerts.id) "
+                         "AND NOT EXISTS(SELECT 1 FROM ai_analysis_intake i WHERE i.alert_id=alerts.id)")
+        elif analysis_status is not None:
+            if analysis_status not in {"PENDING", "PROCESSING", "COMPLETED", "FAILED"}:
+                raise ValueError("invalid analysis status filter")
+            clause = "EXISTS(SELECT 1 FROM alert_analyses a WHERE a.alert_id=alerts.id AND a.status=?)"
+            if analysis_status == "PENDING":
+                clause = f"({clause} OR EXISTS(SELECT 1 FROM ai_analysis_intake i WHERE i.alert_id=alerts.id))"
+            where.append(clause)
+            params.append(analysis_status)
+        return ("WHERE " + " AND ".join(where) if where else ""), params
+
     def query_alerts(
         self,
         *,
@@ -768,27 +801,14 @@ class Database:
         signature_id: int | None = None,
         since_epoch: float | None = None,
         until_epoch: float | None = None,
+        q: str | None = None,
+        analysis_status: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
-        where: list[str] = []
-        params: list[Any] = []
-        if ip:
-            where.append("(src_ip = ? OR dest_ip = ?)")
-            params.extend([ip, ip])
-        if severity is not None:
-            where.append("severity = ?")
-            params.append(severity)
-        if signature_id is not None:
-            where.append("signature_id = ?")
-            params.append(signature_id)
-        if since_epoch is not None:
-            where.append("ts_epoch >= ?")
-            params.append(since_epoch)
-        if until_epoch is not None:
-            where.append("ts_epoch <= ?")
-            params.append(until_epoch)
-        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        cond, params = self._alert_filters(ip=ip, severity=severity, signature_id=signature_id,
+                                          since_epoch=since_epoch, until_epoch=until_epoch,
+                                          q=q, analysis_status=analysis_status)
         with self._lock:
             total = self._conn.execute(
                 f"SELECT COUNT(*) AS c FROM alerts {cond}", params
@@ -822,19 +842,18 @@ class Database:
         *,
         ip: str | None = None,
         since_epoch: float | None = None,
+        until_epoch: float | None = None,
+        severity: int | None = None,
+        signature_id: int | None = None,
+        q: str | None = None,
+        analysis_status: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Group alerts by (flow_id, signature_id) so repeated rule matches on
         the same flow are reported once with a count, not as separate attacks."""
-        where: list[str] = []
-        params: list[Any] = []
-        if ip:
-            where.append("(src_ip = ? OR dest_ip = ?)")
-            params.extend([ip, ip])
-        if since_epoch is not None:
-            where.append("ts_epoch >= ?")
-            params.append(since_epoch)
-        cond = ("WHERE " + " AND ".join(where)) if where else ""
+        cond, params = self._alert_filters(ip=ip, severity=severity, signature_id=signature_id,
+                                          since_epoch=since_epoch, until_epoch=until_epoch,
+                                          q=q, analysis_status=analysis_status)
         with self._lock:
             rows = self._conn.execute(
                 f"""
@@ -847,6 +866,15 @@ class Database:
                 ORDER BY MAX(ts_epoch) DESC LIMIT ?
                 """,
                 [*params, limit],
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def filtered_alert_severity_counts(self, **filters) -> list[dict[str, int]]:
+        cond, params = self._alert_filters(**filters)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT severity,COUNT(*) AS count FROM alerts {cond} GROUP BY severity ORDER BY severity",
+                params,
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1271,7 +1299,7 @@ class Database:
             epoch_now = datetime.now(timezone.utc).timestamp()
             day_start = int(epoch_now // 86400) * 86400 - (days - 1) * 86400
             merged: dict[str, dict[str, int]] = {}
-            for table, column in (("events", "ev"), ("alerts", "al")):
+            for table, column in (("events", "events"), ("alerts", "alerts")):
                 rows = self._conn.execute(
                     f"""
                     SELECT CAST((ts_epoch / 86400.0) AS INTEGER) * 86400 AS day_epoch,
@@ -3057,6 +3085,7 @@ class Database:
                 """,
                 (now,),
             )
+            self._commit()
         where: list[str] = []
         params: list[Any] = []
         if category:

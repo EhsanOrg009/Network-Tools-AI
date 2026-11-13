@@ -17,7 +17,7 @@ runtime data of any particular machine.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Path, Query, Request
 
@@ -544,6 +544,10 @@ def list_events(
 )
 def list_alerts(
     request: Request,
+    q: str | None = Query(None, max_length=200, description="جست‌وجوی متنی در امضا و IP همهٔ هشدارها، پیش از صفحه‌بندی."),
+    analysis_status: Literal["PENDING", "PROCESSING", "COMPLETED", "FAILED", "none"] | None = Query(
+        None, description="وضعیت تحلیل؛ PENDING شامل ورودی خودکار متوقف و none یعنی بدون درخواست است."),
+    include_summary: bool = Query(False, description="تفکیک شدت تمام هشدارهای مطابق فیلتر را اضافه می‌کند؛ فقط خواندنی."),
     ip: str | None = Query(
         None,
         description="فیلتر بر اساس IP مبدأ یا مقصد (IPv4/IPv6؛ اختیاری).",
@@ -577,24 +581,21 @@ def list_alerts(
     db, _, _ = _ctx(request)
     from netagent.database import parse_iso_epoch
 
-    items, total = db.query_alerts(
-        ip=ip,
-        severity=severity,
-        signature_id=signature_id,
-        since_epoch=parse_iso_epoch(since) if since else None,
-        until_epoch=parse_iso_epoch(until) if until else None,
-        limit=limit,
-        offset=offset,
-    )
+    filters = dict(ip=ip, severity=severity, signature_id=signature_id,
+                   since_epoch=parse_iso_epoch(since) if since else None,
+                   until_epoch=parse_iso_epoch(until) if until else None,
+                   q=q, analysis_status=analysis_status)
+    items, total = db.query_alerts(**filters, limit=limit, offset=offset)
     response: dict[str, Any] = {
         "items": items, "total": total, "limit": limit, "offset": offset,
         "note": "هشدار = تطابق قانون؛ اثبات قطعی حمله نیست. action=allowed یعنی بسته عبور کرده.",
     }
     if group_by_flow:
-        since_epoch = parse_iso_epoch(since) if since else None
         response["grouped_by_flow_and_rule"] = db.alert_flow_summary(
-            ip=ip, since_epoch=since_epoch, limit=min(limit, 100)
+            **filters, limit=min(limit, 100)
         )
+    if include_summary:
+        response["severity_counts"] = db.filtered_alert_severity_counts(**filters)
     return response
 
 

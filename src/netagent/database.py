@@ -2391,11 +2391,19 @@ class Database:
                 (max_attempts, datetime.now(timezone.utc).timestamp(), self.security_ai_auto_enabled(), max(0, capacity - active)),
             )
 
-    def alert_analysis_history(self, alert_id: int) -> list[dict[str, Any]]:
+    def alert_analysis_history(self, alert_id: int, *, limit: int | None = None,
+                               offset: int = 0) -> list[dict[str, Any]]:
         with self._lock:
             return [json.loads(r[0]) for r in self._conn.execute(
-                "SELECT result_json FROM ai_analysis_history WHERE alert_id=? ORDER BY archived_at DESC",
-                (alert_id,))]
+                "SELECT result_json FROM ai_analysis_history WHERE alert_id=? "
+                "ORDER BY archived_at DESC, job_id DESC LIMIT ? OFFSET ?",
+                (alert_id, limit if limit is not None else -1, offset))]
+
+    def alert_analysis_history_count(self, alert_id: int) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM ai_analysis_history WHERE alert_id=?", (alert_id,)
+            ).fetchone()[0]
 
     def enqueue_alert_analysis(
         self, *, alert_id: int, fingerprint: str, priority: int = 5,

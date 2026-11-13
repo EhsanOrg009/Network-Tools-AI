@@ -549,11 +549,14 @@ def _request_analysis(db, settings, alert_id, *, actor, reanalyze=False):
 @router.get("/ai-analyses/{alert_id}/history", tags=["مدیریت مدیر شبکه"], summary="تاریخچهٔ محفوظ تلاش‌های تحلیل",
             description="نتایج تلاش‌های پیشین که هنگام درخواست صریح retry یا reanalyze بایگانی شدند؛ حذف تاریخچه انجام نمی‌شود.",
             responses=_responses("تاریخچهٔ تحلیل.", {"items": []}, not_found="هشدار وجود ندارد."))
-def analysis_history(request: Request, alert_id: int = Path(description="شناسهٔ پایدار هشدار.", ge=1)) -> dict[str, Any]:
+def analysis_history(request: Request, alert_id: int = Path(description="شناسهٔ پایدار هشدار.", ge=1),
+                     limit: int | None = Query(None, ge=1, le=100, description="اندازهٔ صفحهٔ تاریخچه؛ حداکثر ۱۰۰. نبود آن رفتار کامل قبلی را حفظ می‌کند."),
+                     offset: int = Query(0, ge=0, description="تعداد تلاش‌های قبلی برای عبور.")) -> dict[str, Any]:
     db, _ = _ctx(request)
     if not db.get_alert(alert_id):
         raise HTTPException(404, detail="هشداری با این شناسه وجود ندارد.")
-    return {"items": db.alert_analysis_history(alert_id)}
+    return {"items": db.alert_analysis_history(alert_id, limit=limit, offset=offset),
+            "total": db.alert_analysis_history_count(alert_id)}
 
 
 @router.post(
@@ -1135,6 +1138,14 @@ def approve_ai_action(
         raise HTTPException(status_code=409, detail="پیشنهاد در وضعیت تأییدپذیر نیست.")
     if action["kind"] != "run_investigation":
         raise HTTPException(status_code=422, detail="این نوع پیشنهاد فعلاً قابل اجرا نیست.")
+    # Persist the administrator's decision before execution. Concurrent
+    # approve/reject requests must never start another investigation or
+    # overwrite a decision while its first investigation is in flight.
+    with db.transaction():
+        if not db.decide_ai_action(action_id, decided_by=actor, status="APPROVED"):
+            raise HTTPException(status_code=409, detail="پیشنهاد در وضعیت تأییدپذیر نیست.")
+        db.record_audit(actor=actor, action="action.approve", target=action_id,
+                        detail={"outcome": "APPROVED"})
     target = action.get("target") or {}
     try:
         record = run_investigation(
@@ -1143,12 +1154,10 @@ def approve_ai_action(
             alert_id=target.get("alert_id"),
         )
     except Exception as exc:
-        db.decide_ai_action(action_id, decided_by=actor, status="OBSERVED")
         db.finish_ai_action(action_id, status="FAILED", result={"error": str(exc)[:300]})
         db.record_audit(actor=actor, action="action.approve", target=action_id,
                         detail={"outcome": "FAILED", "error": str(exc)[:200]})
         raise HTTPException(status_code=502, detail=f"اجرای بررسی ناموفق: {exc}"[:300]) from exc
-    db.decide_ai_action(action_id, decided_by=actor, status="APPROVED")
     db.finish_ai_action(
         action_id, status="EXECUTED",
         result={"investigation_id": record.get("id")},

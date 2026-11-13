@@ -146,6 +146,30 @@ def test_backlog_contract_and_validation(ai_client, db):
     assert db.pending_alert_analysis_count() == 1
 
 
+def test_history_pages_are_read_only_and_preserve_selected_event_results(ai_client, db, settings):
+    a, b = ingest(db, 1), ingest(db, 2)
+    worker = AlertAnalysisWorker(db, settings, FakeLLM())
+    ids = []
+    for _ in range(3):
+        ids.append(request(db, a, reanalyze=True)["job_id"])
+        assert worker.process_one()
+    request(db, a, reanalyze=True)
+    h = admin_headers()
+    url = f"/api/admin/v1/ai-analyses/{a}/history"
+    all_rows = ai_client.get(url, headers=h).json()
+    assert all_rows["total"] == 3
+    assert {r["job_id"] for r in all_rows["items"]} == set(ids)
+    page = ai_client.get(url + "?limit=1&offset=1", headers=h).json()
+    assert page["total"] == 3 and page["items"] == all_rows["items"][1:2]
+    for query in ("limit=0", "limit=101", "offset=-1"):
+        assert ai_client.get(url + "?" + query, headers=h).status_code == 422
+    assert ai_client.get(url + "?limit=1&offset=4", headers=h).json()["items"] == []
+    assert db.get_alert_analysis(b) is None
+    assert not db.security_ai_auto_enabled()
+    assert db.get_alert_analysis(a)["status"] == "PENDING"
+    assert len(db.alert_analysis_history(a)) == 3
+
+
 @pytest.mark.parametrize("saved_policy,saved_limit", [(None, None), ("recent_unprocessed", 7)])
 def test_backlog_migration_preserves_admin_mode_results_and_optional_settings(tmp_path, monkeypatch, settings, saved_policy, saved_limit):
     from netagent.database import Database

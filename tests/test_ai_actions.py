@@ -9,6 +9,8 @@ executes without an admin decision.
 from __future__ import annotations
 
 import pytest
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from netagent.database import Database
 from netagent.services.ai_analysis import AlertAnalysisWorker
@@ -106,6 +108,47 @@ def test_action_approval_runs_real_investigation(mem_client, db):
     r2 = mem_client.post(f"/api/admin/v1/ai-actions/{aid}/approve",
                          headers=admin_headers())
     assert r2.status_code == 409
+
+
+def test_inflight_approval_cannot_be_approved_twice_or_rejected(mem_client, db, monkeypatch):
+    aid = _propose(db)
+    started, finish = threading.Event(), threading.Event()
+    calls = []
+    def investigate(*args, **kwargs):
+        calls.append(aid)
+        started.set()
+        assert finish.wait(3)
+        return {"id": 77}
+    monkeypatch.setattr("netagent.api.admin_routes.run_investigation", investigate)
+    path = f"/api/admin/v1/ai-actions/{aid}"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(mem_client.post, path + "/approve", headers=admin_headers())
+        try:
+            assert started.wait(3)
+            assert db.get_ai_action(aid)["status"] == "APPROVED"
+            assert mem_client.post(path + "/approve", headers=admin_headers()).status_code == 409
+            assert mem_client.post(path + "/reject", headers=admin_headers()).status_code == 409
+        finally:
+            finish.set()
+        assert pending.result(timeout=3).status_code == 200
+    assert calls == [aid]
+    assert db.get_ai_action(aid)["status"] == "EXECUTED"
+
+
+def test_failed_approval_preserves_admin_decision_and_does_not_reexecute(mem_client, db, monkeypatch):
+    aid = _propose(db)
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(aid)
+        assert db.get_ai_action(aid)["status"] == "APPROVED"
+        raise RuntimeError("investigation failed")
+    monkeypatch.setattr("netagent.api.admin_routes.run_investigation", fail)
+    path = f"/api/admin/v1/ai-actions/{aid}/approve"
+    assert mem_client.post(path, headers=admin_headers()).status_code == 502
+    assert db.get_ai_action(aid)["status"] == "FAILED"
+    assert db.get_ai_action(aid)["decided_by"]
+    assert mem_client.post(path, headers=admin_headers()).status_code == 409
+    assert calls == [aid]
 
 
 def test_action_reject_and_404(mem_client, db):

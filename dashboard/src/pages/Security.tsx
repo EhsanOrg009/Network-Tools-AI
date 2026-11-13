@@ -95,6 +95,8 @@ export default function SecurityPage() {
   const [sev, setSev] = useState<string>("all");
   const [aiFilter, setAiFilter] = useState<string>("all");
   const [q, setQ] = useState("");
+  const [search, setSearch] = useState("");
+  const [severityCounts, setSeverityCounts] = useState<{ severity: number; count: number }[]>([]);
   const [detail, setDetail] = useState<AlertRow | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [refreshKey, setRefresh] = useState(0);
@@ -109,6 +111,12 @@ export default function SecurityPage() {
   const sequence = useRef(0);
   const actionInFlight = useRef(false);
   const pageSize = 50;
+  const detailId = detail?.id;
+
+  useEffect(() => {
+    const timer = setTimeout(() => { setSearch(q.trim()); setPage(0); }, 300);
+    return () => clearTimeout(timer);
+  }, [q]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const version = ++sequence.current;
@@ -116,15 +124,18 @@ export default function SecurityPage() {
     try {
       setError(null);
       const sevQ = sev === "all" ? "" : `&severity=${sev}`;
+      const searchQ = search ? `&q=${encodeURIComponent(search)}` : "";
+      const analysisQ = aiFilter === "all" ? "" : `&analysis_status=${aiFilter}`;
       const [d, status] = await Promise.all([
-        api.get<{ items: AlertRow[]; total: number }>(
-          `/api/alerts?limit=${pageSize}&offset=${page * pageSize}&group_by_flow=false${sevQ}`, { signal },
+        api.get<{ items: AlertRow[]; total: number; severity_counts: { severity: number; count: number }[] }>(
+          `/api/alerts?limit=${pageSize}&offset=${page * pageSize}&group_by_flow=false&include_summary=true${sevQ}${searchQ}${analysisQ}`, { signal },
         ),
         api.get<SecurityAIStatus>("/api/admin/v1/security-ai", { signal }).catch(() => null),
       ]);
       if (!current()) return;
       setAlerts(d.items);
       setTotal(d.total);
+      setSeverityCounts(d.severity_counts);
       setAIStatus(status);
       if (status && !initializedPolicy.current) {
         setBacklogPolicy(status.backlog_policy ?? "future_only");
@@ -133,8 +144,12 @@ export default function SecurityPage() {
       }
       let ai: { items: AlertAnalysisRow[] };
       try {
-        ai = d.items.length ? await api.get<{ items: AlertAnalysisRow[] }>(
-          `/api/admin/v1/ai-analyses?alert_ids=${d.items.map((a) => a.id).join(",")}`, { signal },
+        // Keep the open event observable even when a status filter or live
+        // update removes it from this page after an analysis starts.
+        const ids = new Set(d.items.map((a) => a.id));
+        if (detailId !== undefined) ids.add(detailId);
+        ai = ids.size ? await api.get<{ items: AlertAnalysisRow[] }>(
+          `/api/admin/v1/ai-analyses?alert_ids=${[...ids].join(",")}`, { signal },
         ) : { items: [] };
         if (!current()) return;
         setAIError(status ? null : "دریافت وضعیت مدل و تنظیم خودکار ناموفق بود.");
@@ -156,7 +171,7 @@ export default function SecurityPage() {
         : "خطای ناشناخته",
       );
     }
-  }, [sev, page]);
+  }, [sev, page, search, aiFilter, detailId]);
 
   useEffect(() => {
     let stopped = false;
@@ -212,39 +227,28 @@ export default function SecurityPage() {
     }
   }, [load]);
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return (alerts ?? []).filter((a) => {
-      if (needle
-        && !(a.src_ip ?? "").includes(needle)
-        && !(a.dest_ip ?? "").includes(needle)
-        && !(a.signature ?? "").toLowerCase().includes(needle)) return false;
-      if (aiFilter === "all") return true;
-      const st = analyses.get(a.id)?.status;
-      if (aiFilter === "none") return !st;
-      return st === aiFilter;
-    });
-  }, [alerts, q, aiFilter, analyses]);
+  const filtered = alerts ?? [];
 
   const bySev = useMemo(() => {
-    const m = new Map<number, number>();
-    for (const a of alerts ?? []) m.set(a.severity, (m.get(a.severity) ?? 0) + 1);
-    return [...m.entries()].sort((x, y) => x[0] - y[0]).map(([s, c]) => ({
-      label: severityLabel(s), value: c,
-      color: s <= 1 ? CHART_COLORS.danger : s === 2 ? CHART_COLORS.warn : CHART_COLORS.accent2,
+    return severityCounts.map(({ severity, count }) => ({
+      label: severityLabel(severity), value: count,
+      color: severity <= 1 ? CHART_COLORS.danger : severity === 2 ? CHART_COLORS.warn : CHART_COLORS.accent2,
     }));
-  }, [alerts]);
+  }, [severityCounts]);
 
   const detailAnalysis = detail ? analyses.get(detail.id) : undefined;
+  const detailPaused = detailAnalysis?.status === "PENDING" && detailAnalysis.origin !== "manual" && aiStatus?.auto_enabled === false;
+  const modeError = !!aiError || (aiStatus?.auto_enabled && (!aiStatus.connection.ok || !aiStatus.worker_enabled));
 
   return (
     <div>
-      <section className="card security-control" aria-label="کنترل تحلیل امنیت">
+      <section className={`card security-control${modeError ? " has-error" : ""}`} aria-label="کنترل تحلیل امنیت">
         <div className="security-mode">
           <span className="security-mode-icon"><IconShield size={23} /></span>
           <div className="security-mode-copy"><h2>تحلیل خودکار هوش مصنوعی</h2>
             <p>{aiStatus?.auto_enabled ? "هشدارهای تازه با ظرفیت کنترل‌شده وارد صف تحلیل می‌شوند." : "دریافت و ذخیرهٔ هشدارها ادامه دارد؛ تحلیل تکی با انتخاب شما انجام می‌شود."}</p>
           </div>
+          {modeError && <span className="badge badge-danger" role="status">تحلیل نیازمند توجه</span>}
           <button className="btn auto-switch" role="switch" aria-label="تحلیل خودکار هوش مصنوعی"
             aria-checked={aiStatus?.auto_enabled ?? false} disabled={autoBusy || !aiStatus || backlogLimit < 1 || backlogLimit > 200}
             onClick={() => { void toggleAuto(); }}>
@@ -292,17 +296,19 @@ export default function SecurityPage() {
           {(aiError || actionError) && <div className="login-error" role="alert">{actionError || aiError}</div>}
         </div>
       </section>
-      <div className="card security-toolbar">
-        <div className="row wrap" style={{ gap: 12 }}>
+      <div className="security-evidence-note">
           <IconShield size={20} style={{ color: "var(--danger)" }} />
           <div>
-            <div style={{ fontWeight: 700 }}>مرکز امنیت — هشدارهای Suricata + تحلیل هوش مصنوعی</div>
-            <div className="small muted">
-              هر هشدار یعنی الگوی مشابه یک قانون دیده شده؛ <b>شواهد اولیه است، نه اثبات نفوذ</b>.
-              ستون «تحلیل هوش مصنوعی» برداشت مدل است (پس‌زمینه‌ای و تدریجی)، نه واقعیت قطعی.
-            </div>
+            <b>شواهد شبکه، تصمیم آگاهانه</b>
+            <p>هشدار Suricata تطابق یک قانون است؛ اثبات نفوذ نیست. نتیجهٔ هوش مصنوعی برداشت مدل از همین شواهد است.</p>
           </div>
-          <div className="spacer" />
+      </div>
+      <div className="card security-toolbar">
+        <div className="security-filters">
+          <label className="security-search"><span className="field-label">جست‌وجوی رویدادها</span>
+            <input aria-label="جست‌وجو در همهٔ هشدارها" className="input" placeholder="امضای هشدار یا آدرس IP…" maxLength={200} value={q} onChange={(e) => setQ(e.target.value)} />
+          </label>
+          <label><span className="field-label">اولویت امنیتی</span>
           <select aria-label="شدت هشدار" className="input" style={{ width: 140 }} value={sev} onChange={(e) => { setSev(e.target.value); setPage(0); }}>
             <option value="all">همه‌ی شدت‌ها</option>
             <option value="1">بحرانی (1)</option>
@@ -310,7 +316,9 @@ export default function SecurityPage() {
             <option value="3">متوسط (3)</option>
             <option value="4">کم (4)</option>
           </select>
-          <select aria-label="وضعیت تحلیل در این صفحه" className="input" style={{ width: 160 }} value={aiFilter} onChange={(e) => setAiFilter(e.target.value)}>
+          </label>
+          <label><span className="field-label">وضعیت تحلیل</span>
+          <select aria-label="وضعیت تحلیل همهٔ هشدارها" className="input" style={{ width: 160 }} value={aiFilter} onChange={(e) => { setAiFilter(e.target.value); setPage(0); }}>
             <option value="all">تحلیل: همه</option>
             <option value="COMPLETED">تحلیل‌شده</option>
             <option value="PENDING">در صف تحلیل</option>
@@ -318,13 +326,16 @@ export default function SecurityPage() {
             <option value="FAILED">خطای تحلیل</option>
             <option value="none">بدون تحلیل</option>
           </select>
-          <input aria-label="جست‌وجو در هشدارهای این صفحه" className="input" style={{ width: 200 }} placeholder="جست‌وجو در این صفحه…" value={q} onChange={(e) => setQ(e.target.value)} />
+          </label>
           <button className="btn" onClick={() => setRefresh((k) => k + 1)}>↻ به‌روزرسانی</button>
+        </div>
+        <div className="filter-context small muted"><span>فیلترها روی تمام هشدارهای ذخیره‌شده اعمال می‌شوند.</span>
+          {(sev !== "all" || aiFilter !== "all" || q) && <button className="btn ghost sm" onClick={() => { setSev("all"); setAiFilter("all"); setQ(""); setPage(0); }}>پاک‌کردن فیلترها</button>}
         </div>
       </div>
 
       <div className="grid-half" style={{ marginBottom: 14 }}>
-        <Card title="تفکیک شدت — از داده‌ی همین صفحه">
+        <Card title="تفکیک شدت — تمام نتایج فیلتر">
           <BarList items={bySev} />
         </Card>
         <div className="card card-pad" style={{ display: "grid", placeItems: "center" }}>
@@ -344,7 +355,7 @@ export default function SecurityPage() {
         {alerts === null && !error ? <SkeletonRows rows={6} />
           : error ? <ErrorState message={error} onRetry={() => setRefresh((k) => k + 1)} />
             : filtered.length === 0 ? (
-              <EmptyState title="هشداری مطابق فیلتر نیست" hint="فیلتر تحلیل و جست‌وجو روی همین صفحه اعمال می‌شوند؛ صفحه‌بندی برای همهٔ هشدارها در دسترس است." />
+              <EmptyState title="هشداری مطابق فیلتر نیست" hint="فیلترها را تغییر دهید یا برای دریافت رویدادهای تازه به‌روزرسانی کنید." />
             ) : (
               <div className="table-wrap">
                 <table className="data security-table">
@@ -380,7 +391,7 @@ export default function SecurityPage() {
                               if (state && state !== "FAILED" && !paused) setDetail(a);
                               else void analyze(a.id);
                             }}>
-                            {busy === a.id ? <><MiniSpinner />ثبت درخواست…</> : analyses.get(a.id)?.status === "FAILED" ? "تلاش دوباره" : "تحلیل با هوش مصنوعی"}
+                            {busy === a.id ? <><MiniSpinner />ثبت درخواست…</> : analyses.get(a.id)?.status === "FAILED" ? "تلاش دوباره" : analyses.get(a.id)?.status === "COMPLETED" ? "نمایش نتیجه" : analyses.get(a.id)?.status === "PROCESSING" ? "پیگیری تحلیل" : "تحلیل با هوش مصنوعی"}
                           </button>
                         </td>
                         <td className="small muted" title={fmtDateTime(a.ts)}>{fmtAgo(a.ts)}</td>
@@ -399,14 +410,15 @@ export default function SecurityPage() {
       </div>
 
       {detail && (
-        <Dialog title={`هشدار #${detail.id} — شواهد و تحلیل`} onClose={() => setDetail(null)} wide>
+        <Dialog title={`هشدار #${detail.id} — شواهد و تحلیل`} onClose={() => setDetail(null)} wide busy={busy !== null}>
             <div className="row" style={{ marginBottom: 10, gap: 10 }}>
               <IconAlert size={18} style={{ color: "var(--danger)" }} />
               <div className="spacer" />
               <span className={`badge ${detail.severity <= 2 ? "badge-danger" : "badge-muted"}`}>{severityLabel(detail.severity)}</span>
             </div>
 
-            {detailAnalysis && (
+            {actionError && <div className="login-error" role="alert" style={{ marginBottom: 12 }}>{actionError}</div>}
+            {detailAnalysis && !aiError && (
               <div className="card card-pad" style={{ background: "var(--bg-card-2)", marginBottom: 12 }}>
                 <div className="row" style={{ gap: 8, marginBottom: 8 }}>
                   <b>تحلیل هوش مصنوعی</b>
@@ -415,12 +427,12 @@ export default function SecurityPage() {
                   </span>
                   {detailAnalysis.model && <span className="small muted">{detailAnalysis.model}</span>}
                   <div className="spacer" />
-                  {detailAnalysis.status === "COMPLETED" && <button
+                  {(detailAnalysis.status === "COMPLETED" || detailAnalysis.status === "FAILED" || detailPaused) && <button
                     className="btn"
-                    disabled={busy === detail.id}
-                    onClick={() => { void reanalyze(detail.id); }}
+                    disabled={busy !== null}
+                    onClick={() => { if (detailAnalysis.status === "COMPLETED") void reanalyze(detail.id); else void analyze(detail.id); }}
                   >
-                    {busy === detail.id ? "…" : "⟳ تحلیل مجدد"}
+                    {busy === detail.id ? <><MiniSpinner />ثبت درخواست…</> : detailAnalysis.status === "COMPLETED" ? "⟳ تحلیل مجدد" : detailPaused ? "تحلیل تکی این هشدار" : "تلاش دوباره برای این هشدار"}
                   </button>}
                 </div>
                 {detailAnalysis.status === "COMPLETED" ? (
@@ -457,13 +469,17 @@ export default function SecurityPage() {
                 {detailAnalysis.job_id && <div className="small technical">job_id={detailAnalysis.job_id}</div>}
               </div>
             )}
+            {!detailAnalysis && !aiError && <button className="btn primary" style={{ marginBottom: 16 }} disabled={busy !== null} onClick={() => { void analyze(detail.id); }}>
+              {busy === detail.id ? <><MiniSpinner />ثبت درخواست…</> : "تحلیل تکی این هشدار"}
+            </button>}
+            {aiError && <div className="login-error" role="alert">وضعیت تحلیل قابل دریافت نیست: {aiError}</div>}
 
             <div className="small muted" style={{ marginBottom: 4 }}>شواهد خام Suricata:</div>
             <pre className="code-block" style={{ maxHeight: 280 }}>{JSON.stringify(detail, null, 2)}</pre>
             <div className="row" style={{ marginTop: 14 }}>
               <TechChip>{`alert_id=${detail.id}`}</TechChip>
               <div className="spacer" />
-              <button className="btn ghost" onClick={() => setDetail(null)}>بستن</button>
+              <button className="btn ghost" disabled={busy !== null} onClick={() => setDetail(null)}>بستن</button>
             </div>
         </Dialog>
       )}

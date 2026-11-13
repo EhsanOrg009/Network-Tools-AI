@@ -138,6 +138,18 @@ svg { flex-shrink: 0; }
 .connection-chip .dot, .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .connection-chip.lost { color: var(--danger); background: var(--danger-soft); }
 .connection-chip.checking { color: var(--text-3); background: var(--muted-soft); }
+.quick-trigger { font-size: 10.5px; gap: 9px; }
+.quick-trigger kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-3); font: 9px/1.8 var(--font-mono); }
+.quick-search { display: flex; align-items: center; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); color: var(--accent); }
+.quick-results { margin-top: 12px; max-height: 50dvh; overflow-y: auto; scrollbar-width: thin; }
+.quick-result { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 8px; border: 0; border-radius: 8px; text-align: start; background: transparent; color: var(--text-2); transition: background 150ms; }
+.quick-result:hover, .quick-result:focus-visible { background: var(--bg-card-2); }
+.quick-result-icon { width: 34px; height: 34px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex-shrink: 0; }
+.quick-result-copy { flex: 1; min-width: 0; }
+.quick-result-copy b { display: block; font-size: 12px; font-weight: 600; color: var(--text-1); }
+.quick-result-copy small { display: block; margin-top: 2px; font-size: 10px; color: var(--text-3); }
+.quick-result-group { font-size: 9px; color: var(--text-3); white-space: nowrap; }
+.quick-hint { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 10px; }
 .card { min-width: 0; background: var(--bg-card); border: 1px solid var(--border-card-alpha); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
 .card-pad { padding: 22px; }
 .card-header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
@@ -270,6 +282,15 @@ dialog.modal::backdrop { background: #030b11a8; backdrop-filter: blur(4px); }
 .security-queue-item { background: var(--bg-card); padding: 15px 20px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--text-3); }
 .security-queue-item b { font-size: 21px; color: var(--text-1); font-weight: 500; }
 .security-toolbar { padding: 16px 20px; margin-bottom: 18px; }
+.security-control.has-error { border-color: var(--danger); }
+.security-evidence-note { display: flex; align-items: flex-start; gap: 12px; padding: 4px 2px 18px; color: var(--text-2); }
+.security-evidence-note b { font-size: 12px; font-weight: 600; }
+.security-evidence-note p { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+.security-evidence-note svg { margin-top: 4px; }
+.security-filters { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto auto; gap: 16px; align-items: end; }
+.security-filters .field-label { font-size: 10.5px; margin-bottom: 6px; }
+.security-search { min-width: 0; }
+.filter-context { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .security-table { min-width: 1100px; }
 .security-table td:nth-child(2) { min-width: 200px; max-width: 260px; font-family: var(--font-mono); }
 .security-table td:nth-child(4), .security-table td:last-child { white-space: nowrap; }
@@ -292,6 +313,8 @@ dialog.modal::backdrop { background: #030b11a8; backdrop-filter: blur(4px); }
 .login-error { padding: 12px; color: var(--danger); background: var(--danger-soft); border-radius: 8px; margin-top: 14px; font-size: 12px; }
 @media (min-width: 1600px) { .stats-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
 @media (max-width: 1180px) {
+  .quick-trigger span, .quick-trigger kbd { display: none; }
+  .quick-trigger { width: 34px; padding: 6px; }
   .shell { grid-template-columns: 76px minmax(0, 1fr); }
   .sidebar { padding: 24px 10px; }
   .sidebar .brand-text, .sidebar .nav-label, .sidebar .sidebar-footer, .sidebar .nav-section { display: none; }
@@ -305,6 +328,12 @@ dialog.modal::backdrop { background: #030b11a8; backdrop-filter: blur(4px); }
 }
 @media (max-width: 960px) { .grid-2, .grid-half, .overview-primary { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 760px) {
+  .quick-result-group { display: none; }
+  .security-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .security-search { grid-column: 1 / -1; }
+  .security-filters select.input { width: 100% !important; }
+  .security-filters > .btn { grid-column: 1 / -1; }
+  .filter-context { flex-wrap: wrap; font-size: 10px; }
   .shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar { display: none; position: fixed; inset-block: 0; inset-inline-start: 0; width: min(280px, 85vw); padding: 24px 16px; z-index: 80; }
   .sidebar.is-open { display: flex; }

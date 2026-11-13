@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
@@ -11,7 +11,7 @@ beforeEach(() => {
     const data = path.includes("security-ai") ? {
       auto_enabled: false, counts: { PENDING: 0, PROCESSING: 0, COMPLETED: 0, FAILED: 0 },
       connection: { ok: true, detail: "ready" }, worker_enabled: true, model: "test-model",
-    } : path.includes("/api/alerts") ? { items: [], total: 0 } : { ok: true };
+    } : path.includes("/api/alerts") ? { items: [], total: 0, severity_counts: [] } : { ok: true };
     return new Response(JSON.stringify(data));
   }));
 });
@@ -57,4 +57,19 @@ it("closes mobile navigation on Escape and exposes all operations", async () => 
   expect(menu).toHaveAttribute("aria-expanded", "true");
   fireEvent.keyDown(document, { key: "Escape" });
   expect(menu).toHaveAttribute("aria-expanded", "false");
+});
+
+it("finds an operational page through the keyboard navigator without submitting jobs", async () => {
+  setToken("test-admin-token");
+  shell();
+  await screen.findByRole("switch");
+  fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+  const dialog = await screen.findByRole("dialog");
+  const search = within(dialog).getByLabelText("جست‌وجوی صفحه‌ها");
+  fireEvent.change(search, { target: { value: "SECURITY" } });
+  expect(within(dialog).getAllByRole("button")).toHaveLength(2);
+  fireEvent.keyDown(search, { key: "Enter" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.getByRole("switch")).toBeInTheDocument();
+  expect(vi.mocked(fetch).mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
 });

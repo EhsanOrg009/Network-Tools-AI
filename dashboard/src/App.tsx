@@ -1,4 +1,4 @@
-import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from "react";
 import { api, hasToken, setToken, subscribeAuth } from "./lib/api";
 import { ThemeProvider, useTheme } from "./lib/theme";
@@ -6,10 +6,10 @@ import { useLiveFeed } from "./lib/live";
 import {
   IconGauge, IconAgents, IconInbox, IconWifi, IconShield, IconBrain,
   IconGear, IconSun, IconMoon, IconLogout, IconBook, IconHeartbeat,
-  IconCheck, IconMenu, IconX, IconChevron, IconNodes,
+  IconCheck, IconMenu, IconX, IconChevron, IconNodes, IconSearch,
 } from "./components/icons";
 import { TokenGate } from "./components/gate";
-import { SkeletonRows } from "./components/ui";
+import { Dialog, EmptyState, SkeletonRows } from "./components/ui";
 
 const OverviewPage = lazy(() => import("./pages/Overview"));
 const AgentsPage = lazy(() => import("./pages/Agents"));
@@ -64,7 +64,30 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   </>;
 }
 
-function AppBar({ onMenu, menuOpen }: { onMenu: () => void; menuOpen: boolean }) {
+function QuickNavigation({ onClose }: { onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const navigate = useNavigate();
+  const needle = query.trim().toLowerCase();
+  const matches = NAV.filter((item) => `${item.label} ${item.code} ${item.description}`.toLowerCase().includes(needle));
+  const go = (to: string) => { onClose(); navigate(to); };
+  return <Dialog title="دسترسی سریع به فضای کاری" onClose={onClose}>
+    <label className="quick-search"><IconSearch size={18} /><input className="input" autoFocus
+      aria-label="جست‌وجوی صفحه‌ها" placeholder="نام صفحه یا قابلیت را بنویسید…" value={query}
+      onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => {
+        if (e.key === "Enter" && matches.length) { e.preventDefault(); go(matches[0].to); }
+      }} /></label>
+    <div className="quick-results">
+      {matches.map(({ to, label, icon: Icon, description, group }) => <button key={to} className="quick-result" onClick={() => go(to)}>
+        <span className="quick-result-icon"><Icon size={18} /></span><span className="quick-result-copy"><b>{label}</b><small>{description}</small></span>
+        <span className="quick-result-group">{group}</span><IconChevron size={13} />
+      </button>)}
+      {!matches.length && <EmptyState title="صفحه‌ای پیدا نشد" hint="نام فارسی صفحه یا نام انگلیسی قابلیت را امتحان کنید." />}
+    </div>
+    <p className="small muted quick-hint">با کلید Tab مقصد را انتخاب کنید؛ Enter باز می‌کند و Escape می‌بندد.</p>
+  </Dialog>;
+}
+
+function AppBar({ onMenu, menuOpen, onNavigate }: { onMenu: () => void; menuOpen: boolean; onNavigate: () => void }) {
   const { theme, toggle } = useTheme();
   const feed = useLiveFeed(20000, async () => {
     await api.get("/api/dashboard/v1/healthz");
@@ -76,6 +99,7 @@ function AppBar({ onMenu, menuOpen }: { onMenu: () => void; menuOpen: boolean })
     <button className="btn ghost icon-btn nav-menu" onClick={onMenu} aria-label="بازکردن منوی ناوبری" aria-expanded={menuOpen} aria-controls="main-navigation"><IconMenu size={20} /></button>
     <div className="breadcrumb"><IconNodes size={16} /><span>مرکز عملیات</span><IconChevron size={12} /><b>{title}</b></div>
     <div className="spacer" />
+    <button className="btn ghost quick-trigger" aria-label="دسترسی سریع" onClick={onNavigate} title="دسترسی سریع (Ctrl+K)"><IconSearch size={16} /><span>دسترسی سریع</span><kbd dir="ltr">Ctrl K</kbd></button>
     <span className={`connection-chip${!feed.checked ? " checking" : feed.ok ? "" : " lost"}`} role="status"
       title={feed.ok && feed.lastSync ? "اتصال به هستهٔ مرکزی برقرار است" : "داده‌های قبلی ممکن است به‌روز نباشند"}>
       <span className="dot" />{!feed.checked ? "بررسی اتصال" : feed.ok ? "هسته متصل" : "ارتباط قطع"}
@@ -93,8 +117,20 @@ function AppBar({ onMenu, menuOpen }: { onMenu: () => void; menuOpen: boolean })
 function ShellInner() {
   const authenticated = useSyncExternalStore(subscribeAuth, hasToken);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
   const location = useLocation();
   useEffect(() => { setMenuOpen(false); }, [location.pathname]);
+  useEffect(() => {
+    if (!authenticated) { setQuickOpen(false); return; }
+    const shortcut = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !e.isComposing
+          && !(e.target instanceof Element && e.target.closest("input, textarea, [contenteditable=true]"))) {
+        e.preventDefault(); setMenuOpen(false); setQuickOpen((v) => !v);
+      }
+    };
+    document.addEventListener("keydown", shortcut);
+    return () => document.removeEventListener("keydown", shortcut);
+  }, [authenticated]);
   useEffect(() => {
     if (!menuOpen) return;
     const escape = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
@@ -109,7 +145,7 @@ function ShellInner() {
     <a className="skip-link" href="#page-content">رفتن به محتوای صفحه</a>
     <Sidebar open={menuOpen} onClose={() => setMenuOpen(false)} />
     <div className="shell-content">
-      <AppBar onMenu={() => setMenuOpen((v) => !v)} menuOpen={menuOpen} />
+      <AppBar onMenu={() => setMenuOpen((v) => !v)} menuOpen={menuOpen} onNavigate={() => { setMenuOpen(false); setQuickOpen(true); }} />
       <main className="page" id="page-content">
         <div className="page-heading">
           <div><div className="eyebrow" dir="ltr">{meta.code}</div><h1>{meta.label}</h1><p>{meta.description}</p></div>
@@ -135,6 +171,7 @@ function ShellInner() {
         <footer className="page-footer"><span dir="ltr">NetAgent / Network Operations</span><span>داده‌های واقعی · تحلیل محلی · تصمیم با مدیر</span></footer>
       </main>
     </div>
+    {quickOpen && <QuickNavigation onClose={() => setQuickOpen(false)} />}
   </div>;
 }
 

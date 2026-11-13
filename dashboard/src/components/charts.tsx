@@ -69,7 +69,7 @@ export function TrendChart({ data, series }: {
   const max = Math.ceil(rawMax / step) * step;
   const x = (i: number) => left + innerW * i / Math.max(1, data.length - 1);
   const y = (v: number) => top + innerH - v / max * innerH;
-  const index = selected ?? data.length - 1;
+  const index = Math.min(selected ?? data.length - 1, data.length - 1);
   const focus = data[index];
   return <div>
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", direction: "ltr", display: "block" }}

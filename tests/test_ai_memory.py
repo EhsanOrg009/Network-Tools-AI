@@ -271,4 +271,3 @@ def test_listing_knowledge_does_not_leave_a_transaction_that_blocks_security(db,
     assert db.get_alert_analysis(selected)["job_id"] == row["job_id"]
     assert db.get_alert_analysis(selected)["status"] == "COMPLETED"
 
-

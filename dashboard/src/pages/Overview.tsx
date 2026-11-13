@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import type { Overview, EnrollmentRequest } from "../lib/types";
@@ -8,6 +8,7 @@ import { BarList, CHART_COLORS, Donut, TrendChart } from "../components/charts";
 import { IconAgents, IconGauge, IconShield, IconWifi, IconInbox, IconTerminal, IconHeartbeat, IconChevron } from "../components/icons";
 import { severityLabel } from "../lib/format";
 import { CommandCenter } from "../components/CommandCenter";
+import { usePolling } from "../lib/polling";
 
 export default function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
@@ -15,20 +16,22 @@ export default function OverviewPage() {
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefresh] = useState(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     setLoading(true);
     try {
       setError(null);
-      const d = await api.get<Overview>("/api/dashboard/v1/overview");
+      const d = await api.get<Overview>("/api/dashboard/v1/overview", { signal });
+      if (signal.aborted) return;
       setData(d);
     } catch (e) {
+      if (signal.aborted) return;
       setError(e instanceof Error ? e.message : "خطای ناشناخته");
     } finally {
-      setLoading(false);
+      if (!signal.aborted) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
+  usePolling(load, 15000, true, refreshKey);
 
   if (loading && !data) {
     return (

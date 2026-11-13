@@ -4,7 +4,7 @@
  * All sections label the data SOURCE (agent-declared vs core-derived).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import type { AgentSummary, InventoryData, TaskRow, AuditRow } from "../lib/types";
@@ -15,6 +15,7 @@ import { useToast } from "../components/toast";
 import RemoteConsole from "../components/RemoteConsole";
 import TrafficMonitor from "../components/TrafficMonitor";
 import ScreenCapture from "../components/ScreenCapture";
+import { usePolling } from "../lib/polling";
 
 const TASK_TYPE_FA: Record<string, string> = {
   inventory_collection: "فهرست‌برداری سیستم و شبکه",
@@ -36,6 +37,12 @@ interface AgentBundle {
 
 export default function AgentDetailPage() {
   const { agentId = "" } = useParams();
+  // A different endpoint must never inherit a pending decision, target or
+  // console from the previous endpoint's workspace.
+  return <AgentWorkspace key={agentId} agentId={agentId} />;
+}
+
+function AgentWorkspace({ agentId }: { agentId: string }) {
   const [bundle, setBundle] = useState<AgentBundle | null>(null);
   const [tasks, setTasks] = useState<TaskRow[] | null>(null);
   const [audit, setAudit] = useState<AuditRow[] | null>(null);
@@ -47,23 +54,25 @@ export default function AgentDetailPage() {
   const [diagnosticTarget, setDiagnosticTarget] = useState("");
   const toast = useToast();
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     try {
       setError(null);
-      const d = await api.get<AgentBundle>(`/api/admin/v1/agents/${agentId}?inventory=true`);
-      setBundle(d);
-      const [t, a] = await Promise.all([
-        api.get<{ items: TaskRow[] }>(`/api/admin/v1/tasks?agent_id=${agentId}&limit=50`),
-        api.get<{ items: AuditRow[] }>("/api/admin/v1/audit?limit=300"),
+      const [d, t, a] = await Promise.all([
+        api.get<AgentBundle>(`/api/admin/v1/agents/${agentId}?inventory=true`, { signal }),
+        api.get<{ items: TaskRow[] }>(`/api/admin/v1/tasks?agent_id=${agentId}&limit=50`, { signal }),
+        api.get<{ items: AuditRow[] }>("/api/admin/v1/audit?limit=300", { signal }),
       ]);
+      if (signal.aborted) return;
+      setBundle(d);
       setTasks(t.items);
       setAudit(a.items.filter((x) => (x.target ?? "").includes(agentId)).slice(0, 40));
     } catch (e) {
+      if (signal.aborted) return;
       setError(e instanceof Error ? e.message : "خطای ناشناخته");
     }
   }, [agentId]);
 
-  useEffect(() => { void load(); }, [load, refreshKey]);
+  usePolling(load, 10000, true, refreshKey);
 
   async function requestTask(type: string) {
     setBusyTask(type);
